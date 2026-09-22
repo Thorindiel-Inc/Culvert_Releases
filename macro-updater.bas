@@ -58,7 +58,7 @@ Option Explicit
 '  CONFIG
 ' ---------------------------------------------------------------------------
 
-Private Const SCRIPT_VERSION As String = "2026-09-22a"
+Private Const SCRIPT_VERSION As String = "2026-09-23a"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -72,7 +72,7 @@ Private Const SCRIPT_ID As String = "macro-updater"
 '   python scripts/make_manifest.py --publish <clone of that repo>
 ' Any plain HTTP(S) host would work just as well.
 Private Const UPDATE_BASE_URL As String = _
-    "https://raw.githubusercontent.com/Thorindiel-Inc/Culvert-Macro-Releases/main"
+    "https://raw.githubusercontent.com/Thorindiel-Inc/Culvert_Releases/main"
 
 ' Subfolder beside the workbook where the pre-update copies go.
 Private Const BACKUP_SUBFOLDER As String = "macro-backups"
