@@ -27,6 +27,13 @@ Option Explicit
 ' anything from a run. Bump it whenever this file changes.
 Private Const SCRIPT_VERSION As String = "2026-09-23f"
 
+' One-line summary of what changed in THIS version, shown by the updater
+' next to this module when it's stale. Update alongside SCRIPT_VERSION -
+' must stay on ONE physical line (no "_" continuation - the parser that
+' reads this out does not resolve continuations) and must not contain "|"
+' (breaks manifest.txt's pipe-delimited format).
+Private Const SCRIPT_CHANGELOG As String = "Forces every element active via ACTIVE_MODE All (inline plus a standalone view/ACTIVE call) before capturing; shares the six captures' unified helpers and Part 1 fixes."
+
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
 ' module name in the VBA project is whatever the user typed.

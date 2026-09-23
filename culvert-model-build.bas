@@ -30,6 +30,13 @@ Option Explicit
 ' diagnosing anything from a report.
 Private Const SCRIPT_VERSION As String = "2026-09-23e"
 
+' One-line summary of what changed in THIS version, shown by the updater
+' next to this module when it's stale. Update alongside SCRIPT_VERSION -
+' must stay on ONE physical line (no "_" continuation - the parser that
+' reads this out does not resolve continuations) and must not contain "|"
+' (breaks manifest.txt's pipe-delimited format).
+Private Const SCRIPT_CHANGELOG As String = "EQ-1 no longer references ATA - only DL/EV2/EHA2_L/EHA2_R/EQ. ATA is still built and self-weighted, just not combined."
+
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
 ' module name in the VBA project is whatever the user typed.

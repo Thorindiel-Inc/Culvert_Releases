@@ -14,15 +14,20 @@ Option Explicit
 '  HOW MODULES ARE IDENTIFIED
 '  The .bas files carry no "Attribute VB_Name", so the module name inside a
 '  workbook is whatever the person pasting it typed. Matching on that would
-'  be unreliable, so every managed module declares its own SCRIPT_ID and
-'  SCRIPT_VERSION, and this updater reads those out of the code itself.
+'  be unreliable, so every managed module declares its own SCRIPT_ID,
+'  SCRIPT_VERSION and SCRIPT_CHANGELOG, and this updater reads those out of
+'  the code itself.
 '
 '  WHAT THE SERVER MUST PUBLISH
-'    <UPDATE_BASE_URL>/manifest.txt      one "id|version" per line, # = comment
+'    <UPDATE_BASE_URL>/manifest.txt      one "id|version|changelog" per
+'                                         line, # = comment. changelog is
+'                                         optional - a 2-field "id|version"
+'                                         line still works, just with
+'                                         nothing to show.
 '    <UPDATE_BASE_URL>/<id>.bas          the full module text for that id
 '  e.g.
-'    culvert-beam-diagram-capture|2026-09-22d
-'    wingwall-model-build|2026-09-22-live
+'    culvert-beam-diagram-capture|2026-09-22d|Shares the unified JSON helpers.
+'    wingwall-model-build|2026-09-22-live|PostPlaneLoadTypes now actually sends its PUT.
 '
 '  REQUIREMENT - THIS ONE CATCHES PEOPLE OUT
 '  Replacing code needs "Trust access to the VBA project object model":
@@ -63,7 +68,13 @@ Option Explicit
 '  CONFIG
 ' ---------------------------------------------------------------------------
 
-Private Const SCRIPT_VERSION As String = "2026-09-23c"
+Private Const SCRIPT_VERSION As String = "2026-09-23d"
+
+' One-line summary of what changed in THIS version. This module is the
+' one exception that never gets to SHOW its own changelog (it never
+' checks or replaces itself - see the SAFETY note above), but it still
+' keeps one for the record and for anyone reading the source.
+Private Const SCRIPT_CHANGELOG As String = "Added changelog display - stale modules now show a one-line summary of what changed, from manifest.txt and from each downloaded module's own SCRIPT_CHANGELOG."
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -93,7 +104,7 @@ Public Sub CheckMidasMacroUpdates()
     Dim comp As Object
     Dim code As String
     Dim thisId As String, thisVer As String
-    Dim latest As String
+    Dim latest As String, latestChangelog As String
     Dim okLog As String, staleLog As String, skipLog As String
     Dim okCount As Long, staleCount As Long
     Dim staleNames As String
@@ -130,8 +141,12 @@ Public Sub CheckMidasMacroUpdates()
                     okLog = okLog & "  - " & comp.Name & "  " & thisVer & vbCrLf
                 Else
                     staleCount = staleCount + 1
+                    latestChangelog = ManifestChangelog(manifest, thisId)
                     staleLog = staleLog & "  - " & comp.Name & "  " & thisVer & _
                                "  ->  " & latest & vbCrLf
+                    If Len(latestChangelog) > 0 Then
+                        staleLog = staleLog & "      " & latestChangelog & vbCrLf
+                    End If
                     staleNames = staleNames & comp.Name & "|" & thisId & ";"
                 End If
             End If
@@ -188,6 +203,7 @@ Private Sub InstallUpdates(ByVal staleList As String)
     Dim i As Long
     Dim comp As Object
     Dim newCode As String
+    Dim installedChangelog As String
     Dim doneLog As String, failLog As String
     Dim doneCount As Long, failCount As Long
 
@@ -220,6 +236,13 @@ Private Sub InstallUpdates(ByVal staleList As String)
                     doneCount = doneCount + 1
                     doneLog = doneLog & "  - " & f(0) & "  ->  " & _
                               ConstValue(newCode, "SCRIPT_VERSION") & vbCrLf
+                    ' Read from the DOWNLOADED code, not the manifest - this
+                    ' is what actually got installed, guaranteed consistent
+                    ' with it even if the manifest and the module disagree.
+                    installedChangelog = ConstValue(newCode, "SCRIPT_CHANGELOG")
+                    If Len(installedChangelog) > 0 Then
+                        doneLog = doneLog & "      " & installedChangelog & vbCrLf
+                    End If
                 Else
                     failCount = failCount + 1
                     failLog = failLog & "  - " & f(0) & ": replace failed" & vbCrLf
@@ -327,6 +350,37 @@ Private Function ManifestVersion(ByVal manifest As String, ByVal wantId As Strin
             If UBound(f) >= 1 Then
                 If StrComp(Trim$(f(0)), wantId, vbTextCompare) = 0 Then
                     ManifestVersion = Trim$(f(1))
+                    Exit Function
+                End If
+            End If
+        End If
+    Next i
+
+End Function
+
+
+' Same lookup as ManifestVersion, but the 3rd pipe field (the one-line
+' changelog) instead of the 2nd. "" when the line has no 3rd field - an
+' older 2-field "id|version" manifest line still works, it just has
+' nothing to show here.
+Private Function ManifestChangelog(ByVal manifest As String, ByVal wantId As String) As String
+
+    Dim rows() As String
+    Dim f() As String
+    Dim i As Long
+    Dim ln As String
+
+    manifest = Replace(manifest, vbCrLf, vbLf)
+    manifest = Replace(manifest, vbCr, vbLf)
+    rows = Split(manifest, vbLf)
+
+    For i = LBound(rows) To UBound(rows)
+        ln = Trim$(rows(i))
+        If Len(ln) > 0 And Left$(ln, 1) <> "#" Then
+            f = Split(ln, "|")
+            If UBound(f) >= 1 Then
+                If StrComp(Trim$(f(0)), wantId, vbTextCompare) = 0 Then
+                    If UBound(f) >= 2 Then ManifestChangelog = Trim$(f(2))
                     Exit Function
                 End If
             End If

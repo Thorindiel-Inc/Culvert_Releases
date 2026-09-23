@@ -30,6 +30,13 @@ Option Explicit
 ' anything from a run. Bump it whenever this file changes.
 Private Const SCRIPT_VERSION As String = "2026-09-23g"
 
+' One-line summary of what changed in THIS version, shown by the updater
+' next to this module when it's stale. Update alongside SCRIPT_VERSION -
+' must stay on ONE physical line (no "_" continuation - the parser that
+' reads this out does not resolve continuations) and must not contain "|"
+' (breaks manifest.txt's pipe-delimited format).
+Private Const SCRIPT_CHANGELOG As String = "Adds DISPLAY.VIEW.UCS_AXIS to draw the UCS triad on foundation captures - confirmed a no-op in the API and in Civil NX's own GUI, kept harmlessly."
+
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
 ' module name in the VBA project is whatever the user typed.
