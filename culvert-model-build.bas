@@ -28,14 +28,14 @@ Option Explicit
 ' so a screenshot of a run does not otherwise say which build produced it -
 ' bump this whenever the file changes and check it matches before
 ' diagnosing anything from a report.
-Private Const SCRIPT_VERSION As String = "2026-09-23e"
+Private Const SCRIPT_VERSION As String = "2026-09-23f"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "EQ-1 no longer references ATA - only DL/EV2/EHA2_L/EHA2_R/EQ. ATA is still built and self-weighted, just not combined."
+Private Const SCRIPT_CHANGELOG As String = "Audit rev 2: adds ENV_EQ (seismic only), required dimensions must be present and above 0, an error value in an optional cell stops the build, the seismic gate reads this workbook and shows its source (stops if undetermined), long timeout for doc/ANAL and post/TABLE, result-table combinations derived from the generated list, verdict first in the report."
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -277,6 +277,12 @@ Private Const SECTION_COLOR_OPACITY As Double = 0.5
 ' ---------------------------------------------------------------------------
 Private Const SEISMIC_GATE_OVERRIDE As Long = -1
 Private SEISMIC_ACTIVE As Boolean
+' Where the gate's value came from, for the build report (e.g.
+' "1_GIRIS!O81 = 0.769 >= 0.5"), and whether it could be determined at
+' all. Auto-detect that finds neither source stops the build instead of
+' silently dropping the whole seismic chain.
+Private SEISMIC_GATE_SOURCE As String
+Private SEISMIC_GATE_KNOWN As Boolean
 
 ' ---------------------------------------------------------------------------
 '  PROGRESS BAR
@@ -384,16 +390,23 @@ Private Const STLDCASE_LIST As String = _
 
 Private Sub InitSeismicGate()
 
+    SEISMIC_GATE_KNOWN = True
+
     If SEISMIC_GATE_OVERRIDE = 0 Then
         SEISMIC_ACTIVE = False
+        SEISMIC_GATE_SOURCE = "forced OFF by SEISMIC_GATE_OVERRIDE = 0"
     ElseIf SEISMIC_GATE_OVERRIDE = 1 Then
         SEISMIC_ACTIVE = True
+        SEISMIC_GATE_SOURCE = "forced ON by SEISMIC_GATE_OVERRIDE = 1"
     Else
         SEISMIC_ACTIVE = DetectSeismicGate()
     End If
 
 End Sub
 
+' Sets SEISMIC_GATE_SOURCE, and SEISMIC_GATE_KNOWN = False when neither
+' 1_GIRIS nor the INPUT cells could be evaluated. Reads THIS workbook, not
+' the active one.
 Private Function DetectSeismicGate() As Boolean
 
     Dim wsGiris As Worksheet
@@ -401,34 +414,34 @@ Private Function DetectSeismicGate() As Boolean
     Dim pVal As String
     Dim oVal As Double, qVal As Double
     Dim hCover As Double, hWall As Double, tTop As Double, tBot As Double
+    Dim ratio As Double
 
     On Error Resume Next
-    Set wsGiris = ActiveWorkbook.Worksheets("1_GIRIS")
+    Set wsGiris = ThisWorkbook.Worksheets("1_GIRIS")
     If Not wsGiris Is Nothing Then
         pVal = Trim$(CStr(wsGiris.Range("P81").Value))
         If pVal = "<" Then
             DetectSeismicGate = True
+            SEISMIC_GATE_SOURCE = "1_GIRIS!P81 = ""<"""
             Exit Function
         ElseIf pVal = ">" Then
             DetectSeismicGate = False
+            SEISMIC_GATE_SOURCE = "1_GIRIS!P81 = "">"""
             Exit Function
         End If
         If IsNumeric(wsGiris.Range("O81").Value) And IsNumeric(wsGiris.Range("Q81").Value) Then
             oVal = CDbl(wsGiris.Range("O81").Value)
             qVal = CDbl(wsGiris.Range("Q81").Value)
-            If oVal < qVal Then
-                DetectSeismicGate = True
-                Exit Function
-            Else
-                DetectSeismicGate = False
-                Exit Function
-            End If
+            DetectSeismicGate = (oVal < qVal)
+            SEISMIC_GATE_SOURCE = "1_GIRIS!O81 = " & Format$(oVal, "0.000") & _
+                                  IIf(oVal < qVal, " < ", " >= ") & Format$(qVal, "0.000")
+            Exit Function
         End If
     End If
 
-    Set wsInput = ActiveWorkbook.Worksheets(PROJECT_SHEET_NAME)
+    Set wsInput = ThisWorkbook.Worksheets(PROJECT_SHEET_NAME)
     If wsInput Is Nothing Then
-        Set wsInput = ActiveWorkbook.Worksheets("INPUT")
+        Set wsInput = ThisWorkbook.Worksheets("INPUT")
     End If
     If Not wsInput Is Nothing Then
         If IsNumeric(wsInput.Range("B21").Value) And IsNumeric(wsInput.Range("B23").Value) And _
@@ -438,7 +451,10 @@ Private Function DetectSeismicGate() As Boolean
             tTop = CDbl(wsInput.Range("B12").Value)
             tBot = CDbl(wsInput.Range("B14").Value)
             If (hWall + tTop + tBot) > 0 Then
-                DetectSeismicGate = ((hCover / (hWall + tTop + tBot)) < 0.5)
+                ratio = hCover / (hWall + tTop + tBot)
+                DetectSeismicGate = (ratio < 0.5)
+                SEISMIC_GATE_SOURCE = "Z/H = INPUT!B21/(B23+B12+B14) = " & Format$(ratio, "0.000") & _
+                                      IIf(ratio < 0.5, " < ", " >= ") & "0.500"
                 Exit Function
             End If
         End If
@@ -446,6 +462,9 @@ Private Function DetectSeismicGate() As Boolean
     On Error GoTo 0
 
     DetectSeismicGate = False
+    SEISMIC_GATE_KNOWN = False
+    SEISMIC_GATE_SOURCE = "could not be determined - neither 1_GIRIS!P81/O81/Q81 nor " & _
+                          "INPUT!B21/B23/B12/B14 hold usable values"
 
 End Function
 
@@ -466,12 +485,22 @@ Sub BuildCulvertModel()
     report = "Box culvert model build  [" & SCRIPT_VERSION & "]" & vbCrLf & _
              String(40, "-") & vbCrLf
 
+    ' Stop before anything is deleted or written: silently building without
+    ' the seismic chain is the unsafe default.
+    If Not SEISMIC_GATE_KNOWN Then
+        MsgBox report & "STOPPED - nothing was changed in the model." & vbCrLf & vbCrLf & _
+               "The seismic gate " & SEISMIC_GATE_SOURCE & "." & vbCrLf & vbCrLf & _
+               "Fix those cells, or set SEISMIC_GATE_OVERRIDE to 0 (off) or 1 (on) " & _
+               "at the top of this module.", vbExclamation
+        Exit Sub
+    End If
+
     If SEISMIC_ACTIVE Then
-        report = report & "NOTE - seismic gate is ON (EQ/ATA cases, loads, and EQ-1 combo active)." & vbCrLf & _
-                 String(40, "-") & vbCrLf
+        report = report & "NOTE - seismic gate is ON (" & SEISMIC_GATE_SOURCE & "): EQ/ATA " & _
+                 "cases and loads, EQ-1 and ENV_EQ active." & vbCrLf & String(40, "-") & vbCrLf
     Else
-        report = report & "NOTE - seismic gate is OFF (no EQ/ATA cases or loads)." & vbCrLf & _
-                 String(40, "-") & vbCrLf
+        report = report & "NOTE - seismic gate is OFF (" & SEISMIC_GATE_SOURCE & "): no EQ/ATA " & _
+                 "cases or loads." & vbCrLf & String(40, "-") & vbCrLf
     End If
 
     ' Wipe first, so every PUT below lands in an empty endpoint and the
@@ -520,16 +549,12 @@ Sub BuildCulvertModel()
     If ok Then ok = StepResult(report, Progress("Perform Analysis"), PostPerformAnalysis())
     If ok Then ok = StepResult(report, Progress("Beam Force Results"), PostBeamForceResults())
 
-    If ok Then
-        report = report & vbCrLf & "All steps completed."
-    Else
-        report = report & vbCrLf & "Stopped after the first failed step - fix it and re-run."
-    End If
+    report = VerdictFirst(report, ok)
 
     ' Before the MsgBox, and on the failure path too - see ClearProgress.
     Call ClearProgress
 
-    MsgBox report, IIf(ok, vbInformation, vbExclamation)
+    MsgBox FitReport(report, SCRIPT_ID), IIf(ok, vbInformation, vbExclamation)
 
 End Sub
 
@@ -589,6 +614,9 @@ End Sub
 
 Private Sub ResetProgress(ByVal total As Long)
     PROGRESS_STEP = 0
+    ' Re-read INPUT!J20 on every run, so a key rotated since the last run
+    ' is actually used.
+    MAPI_KEY_CACHE = ""
     PROGRESS_TOTAL = IIf(total < 1, 1, total)
     ' Paired with ClearProgress, which already runs on every exit path.
     ' ScreenUpdating only: EnableEvents and Calculation are deliberately NOT
@@ -921,24 +949,29 @@ Private Function ReadInputs() As String
         Exit Function
     End If
 
-    If Not TryReadCell(ws, "B4", DIM_SLAB_T) Then ReadInputs = "B4 is not a number.": Exit Function
-    If Not TryReadCell(ws, "B5", DIM_WALL_T) Then ReadInputs = "B5 is not a number.": Exit Function
-    If Not TryReadCell(ws, "B7", DIM_FOUND_T) Then ReadInputs = "B7 is not a number.": Exit Function
-    If Not TryReadCell(ws, "B18", DIM_SPAN) Then ReadInputs = "B18 is not a number.": Exit Function
-    If Not TryReadCell(ws, "B19", DIM_WALL_H) Then ReadInputs = "B19 is not a number.": Exit Function
+    ReadInputs = RequirePositive(ws, "B4", "slab thickness", DIM_SLAB_T)
+    If Len(ReadInputs) > 0 Then Exit Function
+    ReadInputs = RequirePositive(ws, "B5", "wall thickness", DIM_WALL_T)
+    If Len(ReadInputs) > 0 Then Exit Function
+    ReadInputs = RequirePositive(ws, "B7", "foundation thickness", DIM_FOUND_T)
+    If Len(ReadInputs) > 0 Then Exit Function
+    ReadInputs = RequirePositive(ws, "B18", "clear span", DIM_SPAN)
+    If Len(ReadInputs) > 0 Then Exit Function
+    ReadInputs = RequirePositive(ws, "B19", "wall height", DIM_WALL_H)
+    If Len(ReadInputs) > 0 Then Exit Function
 
     ' Optional / zero-allowed inputs - a blank cell reads as 0, which is the
     ' MCT module's own "feature off" value for B6/B8/B9/B17.
-    Call TryReadCell(ws, "B6", DIM_SECT3)
-    Call TryReadCell(ws, "B8", DIM_SLAB_HAUNCH)
-    Call TryReadCell(ws, "B9", DIM_WALL_HAUNCH)
-    Call TryReadCell(ws, "B10", DIM_SECT5)
-    Call TryReadCell(ws, "B11", DIM_SECT6)
-    Call TryReadCell(ws, "B12", DIM_SECT7)
-    Call TryReadCell(ws, "B13", DIM_SECT8)
-    Call TryReadCell(ws, "B16", DIM_SECT9)
-    Call TryReadCell(ws, "B15", DIM_ATA_FACTOR)
-    Call TryReadCell(ws, "B17", DIM_EXT)
+    If Not TryReadCell(ws, "B6", DIM_SECT3) Then ReadInputs = BadOptionalCell("B6"): Exit Function
+    If Not TryReadCell(ws, "B8", DIM_SLAB_HAUNCH) Then ReadInputs = BadOptionalCell("B8"): Exit Function
+    If Not TryReadCell(ws, "B9", DIM_WALL_HAUNCH) Then ReadInputs = BadOptionalCell("B9"): Exit Function
+    If Not TryReadCell(ws, "B10", DIM_SECT5) Then ReadInputs = BadOptionalCell("B10"): Exit Function
+    If Not TryReadCell(ws, "B11", DIM_SECT6) Then ReadInputs = BadOptionalCell("B11"): Exit Function
+    If Not TryReadCell(ws, "B12", DIM_SECT7) Then ReadInputs = BadOptionalCell("B12"): Exit Function
+    If Not TryReadCell(ws, "B13", DIM_SECT8) Then ReadInputs = BadOptionalCell("B13"): Exit Function
+    If Not TryReadCell(ws, "B16", DIM_SECT9) Then ReadInputs = BadOptionalCell("B16"): Exit Function
+    If Not TryReadCell(ws, "B15", DIM_ATA_FACTOR) Then ReadInputs = BadOptionalCell("B15"): Exit Function
+    If Not TryReadCell(ws, "B17", DIM_EXT) Then ReadInputs = BadOptionalCell("B17"): Exit Function
 
     ' Divide amount from INPUT!K15 (subdivision count for elements 18, 10, 11, 4)
     DIVIDE_AMOUNT = 0
@@ -956,27 +989,27 @@ Private Function ReadInputs() As String
     End If
     On Error GoTo 0
 
-    Call TryReadCell(ws, "B21", LD_EV1)
-    Call TryReadCell(ws, "B22", LD_EV2)
-    Call TryReadCell(ws, "B37", LD_EV1_EXT)
-    Call TryReadCell(ws, "B36", LD_EV2_EXT)
-    Call TryReadCell(ws, "B23", LD_EHS1_TOP)
-    Call TryReadCell(ws, "B24", LD_EHS1_BOT)
-    Call TryReadCell(ws, "B25", LD_EHA1_TOP)
-    Call TryReadCell(ws, "B26", LD_EHA1_BOT)
-    Call TryReadCell(ws, "B27", LD_EHS2_TOP)
-    Call TryReadCell(ws, "B28", LD_EHS2_BOT)
-    Call TryReadCell(ws, "B29", LD_EHA2_TOP)
-    Call TryReadCell(ws, "B30", LD_EHA2_BOT)
-    Call TryReadCell(ws, "B31", LD_LL1)
-    Call TryReadCell(ws, "B32", LD_LL)
-    Call TryReadCell(ws, "B39", LD_LLACC)
-    Call TryReadCell(ws, "B38", LD_LSS1_L)
-    Call TryReadCell(ws, "B33", LD_LSS2_L)
-    Call TryReadCell(ws, "B40", LD_LSA2_L)
-    Call TryReadCell(ws, "B34", LD_EQ_TOP)
-    Call TryReadCell(ws, "B35", LD_EQ_BOT)
-    Call TryReadCell(ws, "B42", SPRING_KZ_MODULUS)
+    If Not TryReadCell(ws, "B21", LD_EV1) Then ReadInputs = BadOptionalCell("B21"): Exit Function
+    If Not TryReadCell(ws, "B22", LD_EV2) Then ReadInputs = BadOptionalCell("B22"): Exit Function
+    If Not TryReadCell(ws, "B37", LD_EV1_EXT) Then ReadInputs = BadOptionalCell("B37"): Exit Function
+    If Not TryReadCell(ws, "B36", LD_EV2_EXT) Then ReadInputs = BadOptionalCell("B36"): Exit Function
+    If Not TryReadCell(ws, "B23", LD_EHS1_TOP) Then ReadInputs = BadOptionalCell("B23"): Exit Function
+    If Not TryReadCell(ws, "B24", LD_EHS1_BOT) Then ReadInputs = BadOptionalCell("B24"): Exit Function
+    If Not TryReadCell(ws, "B25", LD_EHA1_TOP) Then ReadInputs = BadOptionalCell("B25"): Exit Function
+    If Not TryReadCell(ws, "B26", LD_EHA1_BOT) Then ReadInputs = BadOptionalCell("B26"): Exit Function
+    If Not TryReadCell(ws, "B27", LD_EHS2_TOP) Then ReadInputs = BadOptionalCell("B27"): Exit Function
+    If Not TryReadCell(ws, "B28", LD_EHS2_BOT) Then ReadInputs = BadOptionalCell("B28"): Exit Function
+    If Not TryReadCell(ws, "B29", LD_EHA2_TOP) Then ReadInputs = BadOptionalCell("B29"): Exit Function
+    If Not TryReadCell(ws, "B30", LD_EHA2_BOT) Then ReadInputs = BadOptionalCell("B30"): Exit Function
+    If Not TryReadCell(ws, "B31", LD_LL1) Then ReadInputs = BadOptionalCell("B31"): Exit Function
+    If Not TryReadCell(ws, "B32", LD_LL) Then ReadInputs = BadOptionalCell("B32"): Exit Function
+    If Not TryReadCell(ws, "B39", LD_LLACC) Then ReadInputs = BadOptionalCell("B39"): Exit Function
+    If Not TryReadCell(ws, "B38", LD_LSS1_L) Then ReadInputs = BadOptionalCell("B38"): Exit Function
+    If Not TryReadCell(ws, "B33", LD_LSS2_L) Then ReadInputs = BadOptionalCell("B33"): Exit Function
+    If Not TryReadCell(ws, "B40", LD_LSA2_L) Then ReadInputs = BadOptionalCell("B40"): Exit Function
+    If Not TryReadCell(ws, "B34", LD_EQ_TOP) Then ReadInputs = BadOptionalCell("B34"): Exit Function
+    If Not TryReadCell(ws, "B35", LD_EQ_BOT) Then ReadInputs = BadOptionalCell("B35"): Exit Function
+    If Not TryReadCell(ws, "B42", SPRING_KZ_MODULUS) Then ReadInputs = BadOptionalCell("B42"): Exit Function
 
     ' Ec from MIDAS_INPUT!B43; unit weight from the "INPUT" sheet's B5.
     ' Neither blocks the build if missing/invalid - falls back to the
@@ -1039,8 +1072,42 @@ Private Function TryReadCell(ByVal ws As Worksheet, ByVal addr As String, _
         result = CDbl(v)
         TryReadCell = True
     Else
+        ' Never leave the caller holding the previous run's value - these
+        ' targets are module-level and survive between runs.
+        result = 0
         TryReadCell = False
     End If
+End Function
+
+' "" when addr holds a number > 0, otherwise a message naming the cell.
+' TryReadCell accepts a blank cell as 0 - right for an optional feature
+' switch, wrong for a thickness or a span, which would build a degenerate
+' model with no error from MIDAS.
+Private Function RequirePositive(ByVal ws As Worksheet, ByVal addr As String, _
+                                 ByVal label As String, ByRef result As Double) As String
+
+    Dim v As Variant
+
+    v = ws.Range(addr).Value
+
+    If IsEmpty(v) Or IsError(v) Then
+        RequirePositive = ws.Name & "!" & addr & " (" & label & ") is blank or an error value."
+    ElseIf Not IsNumeric(v) Then
+        RequirePositive = ws.Name & "!" & addr & " (" & label & ") is not a number."
+    ElseIf CDbl(v) <= 0 Then
+        RequirePositive = ws.Name & "!" & addr & " (" & label & ") must be greater than 0."
+    Else
+        result = CDbl(v)
+    End If
+
+End Function
+
+' The message for an optional cell holding text or an error value. A blank
+' optional cell is fine (it means 0 / feature off); #VALUE!, #REF! or text
+' almost always means a broken formula, so the build stops and names it.
+Private Function BadOptionalCell(ByVal addr As String) As String
+    BadOptionalCell = INPUT_SHEET_NAME & "!" & addr & " holds text or an error value. " & _
+                      "Leave it blank for 0, or fix the formula."
 End Function
 
 
@@ -1451,7 +1518,7 @@ End Sub
 '  LOAD COMBINATIONS - fixed set, transcribed from the sheet's old
 '  *LOADCOMB block. Nothing is read from the worksheet any more.
 '
-'  34 combinations (33 when SEISMIC_ACTIVE is False - no EQ-1):
+'  35 combinations (33 when SEISMIC_ACTIVE is False - no EQ-1, no ENV_EQ):
 '    SLS-1..14   serviceability, factors 1.0 / 0.5
 '    ULS-1..14   ultimate, 1.35 permanent / 1.5 / 1.45 / 0.75
 '    ACC-1       accidental (LLacc) - NOT seismic, always built
@@ -1462,6 +1529,7 @@ End Sub
 '    ENV_ALL     envelope of ENV_SER + ENV_STR, plus EQ-1 when
 '                SEISMIC_ACTIVE (see the gate at the top of the module)
 '    ENV_DEAD    envelope of the four no-live-load SLS cases
+'    ENV_EQ      envelope of EQ-1 - only when SEISMIC_ACTIVE
 '  The SLS/ULS/ACC/EQ combinations reference static load cases ("ST");
 '  every ENV_* one references other combinations ("CB"), which is why
 '  each combination's factor list is homogeneous and AddCombo can take a
@@ -1544,6 +1612,13 @@ Private Sub GenerateLoadCombinations()
     End If
 
     Call AddCombo("ENV_DEAD", 1, "CB", "SLS-2:1,SLS-4:1,SLS-5:1,SLS-6:1", 2)
+
+    ' ENV_EQ, the seismic envelope the displacement capture reads. Last, so
+    ' every other combination keeps the key it always had; seismic only,
+    ' like EQ-1 itself (the capture reports it SKIPPED otherwise).
+    If SEISMIC_ACTIVE Then
+        Call AddCombo("ENV_EQ", 1, "CB", "EQ-1:1", 2)
+    End If
 
 End Sub
 
@@ -2492,16 +2567,20 @@ Private Function PostBeamForceResults() As String
     Dim rowCount1 As Long, rowCount2 As Long
     Dim lastUsedRow As Long
     Dim fRow As Long
+    Dim combRows() As String
+    Dim combName As String
 
+    ' ThisWorkbook, not ActiveWorkbook: Progress() calls DoEvents, so the
+    ' user can switch workbooks during a long build.
     On Error Resume Next
-    Set ws = ActiveWorkbook.Worksheets(RESULT_SHEET_NAME)
+    Set ws = ThisWorkbook.Worksheets(RESULT_SHEET_NAME)
     If ws Is Nothing Then
-        Set ws = ActiveWorkbook.Worksheets("MIDAS_RESULT")
+        Set ws = ThisWorkbook.Worksheets("MIDAS_RESULT")
     End If
     On Error GoTo 0
 
     If ws Is Nothing Then
-        PostBeamForceResults = "WARN: Worksheet '" & RESULT_SHEET_NAME & "' not found in active workbook."
+        PostBeamForceResults = "WARN: Worksheet '" & RESULT_SHEET_NAME & "' not found in this workbook."
         Exit Function
     End If
 
@@ -2519,17 +2598,19 @@ Private Function PostBeamForceResults() As String
     End If
 
     ' --- Table 1: Primary load combinations ---
-    ' SLS-1 to SLS-14 and ULS-1 to ULS-14
+    ' Every SLS-*, ULS-* and EQ-1 combination GenerateLoadCombinations
+    ' actually produced, in its order - taken from LOADCOMB_LIST rather than
+    ' a hardcoded "1 To 14", so a combination added there cannot silently
+    ' miss this table. ACC-1 stays out by request; EQ-1 is only in the list
+    ' when the seismic gate is on.
     t1Combos = ""
-    For i = 1 To 14
-        t1Combos = t1Combos & IIf(Len(t1Combos) > 0, ",", "") & """SLS-" & i & "(CB)"""
+    combRows = Split(LOADCOMB_LIST, ";")
+    For i = LBound(combRows) To UBound(combRows)
+        combName = Split(combRows(i), "|")(0)
+        If Left$(combName, 4) = "SLS-" Or Left$(combName, 4) = "ULS-" Or combName = "EQ-1" Then
+            t1Combos = t1Combos & IIf(Len(t1Combos) > 0, ",", "") & """" & combName & "(CB)"""
+        End If
     Next i
-    For i = 1 To 14
-        t1Combos = t1Combos & "," & """ULS-" & i & "(CB)"""
-    Next i
-    If SEISMIC_ACTIVE Then
-        t1Combos = t1Combos & ",""EQ-1(CB)"""
-    End If
 
     body = BuildTableReqJson("BeamForce_T1", t1Combos)
     Call SendApiRequest("POST", "post/TABLE", body, resp, statusCode)
@@ -2840,6 +2921,17 @@ Private Sub SendApiRequest(ByVal httpMethod As String, ByVal path As String, ByV
 
     On Error Resume Next
 
+    ' resolve, connect, send, receive (ms). A long receive timeout ONLY for
+    ' the solve and the request right after it (post/TABLE reads the fresh
+    ' results): doc/ANAL is synchronous and a real model can take longer
+    ' than WinHTTP's 30 s default. Everything else keeps the defaults, set
+    ' explicitly because the one client is reused across calls.
+    If path = "doc/ANAL" Or path = "post/TABLE" Then
+        HTTP_CLIENT.SetTimeouts 0, 60000, 30000, 600000
+    Else
+        HTTP_CLIENT.SetTimeouts 0, 60000, 30000, 30000
+    End If
+
     HTTP_CLIENT.Open httpMethod, url, False
     HTTP_CLIENT.SetRequestHeader "MAPI-Key", MapiKey()
     HTTP_CLIENT.SetRequestHeader "Content-Type", "application/json"
@@ -3005,5 +3097,67 @@ Private Function HttpStatusHint(ByVal statusCode As Long) As String
         Case Else
             HttpStatusHint = ""
     End Select
+
+End Function
+
+
+' Moves the verdict to the top of the report, right under the title line.
+' MsgBox shows only about 1024 characters, and the failing step used to be
+' the LAST line - the first thing to be cut off. The failure is the last
+' "FAIL - " entry: the clean pass runs first, so any FAIL lines it logged
+' come earlier.
+Private Function VerdictFirst(ByVal report As String, ByVal ok As Boolean) As String
+
+    Dim verdict As String
+    Dim p As Long
+
+    If ok Then
+        verdict = "All steps completed."
+    Else
+        p = InStrRev(report, "FAIL - ")
+        If p > 0 Then
+            verdict = "STOPPED - " & Mid$(report, p) & "Fix it and re-run."
+        Else
+            verdict = "STOPPED after a failed step - fix it and re-run."
+        End If
+    End If
+
+    VerdictFirst = Replace(report, vbCrLf, vbCrLf & verdict & vbCrLf & vbCrLf, 1, 1)
+
+End Function
+
+
+' MsgBox shows only about 1024 characters and silently drops the rest.
+' When the report is longer, the whole text goes to <logName>_log.txt next
+' to the workbook (or in %TEMP% if it has never been saved) and the MsgBox
+' shows the start of it plus where the rest is. Callers put the verdict
+' first, so what gets cut is the least important part.
+Private Function FitReport(ByVal report As String, ByVal logName As String) As String
+
+    Const MAX_LEN As Long = 900
+    Dim path As String
+    Dim fileNo As Integer
+
+    If Len(report) <= MAX_LEN Then
+        FitReport = report
+        Exit Function
+    End If
+
+    If Len(ThisWorkbook.Path) > 0 Then
+        path = ThisWorkbook.Path & "\" & logName & "_log.txt"
+    Else
+        path = Environ$("TEMP") & "\" & logName & "_log.txt"
+    End If
+
+    On Error Resume Next
+    fileNo = FreeFile
+    Open path For Output As #fileNo
+    Print #fileNo, report
+    Close #fileNo
+    If Err.Number <> 0 Then path = "(could not be written: " & Err.Description & ")"
+    Err.Clear
+    On Error GoTo 0
+
+    FitReport = Left$(report, MAX_LEN) & vbCrLf & "..." & vbCrLf & "Full report: " & path
 
 End Function

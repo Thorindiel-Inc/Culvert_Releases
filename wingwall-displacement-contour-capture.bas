@@ -27,14 +27,14 @@ Option Explicit
 ' hand, so the file in the repo and the code actually running can silently
 ' diverge - check this stamp matches the constant here before concluding
 ' anything from a run. Bump it whenever this file changes.
-Private Const SCRIPT_VERSION As String = "2026-09-23f"
+Private Const SCRIPT_VERSION As String = "2026-09-23g"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Shares all six captures' unified JSON helpers (escape-aware extractor, AtoBbyN range parser), IsApiSuccess gate, non-blocking wait and reused WinHTTP client."
+Private Const SCRIPT_CHANGELOG As String = "Audit rev 2: skips jobs whose load case or combination is not in the model, deletes the old JPEG before capturing, inserts the new picture before removing the old one, warns instead of aborting on a failed unit switch, re-reads the MAPI key every run, validates element lists, and puts failures first with a log file when the report is long."
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -161,19 +161,23 @@ Sub CaptureWingwallDisplacementContours()
     Dim jobs() As CaptureJob
     Dim i As Integer
     Dim body As String
-    Dim resp As String
-    Dim statusCode As Long
     Dim outFolder As String
     Dim exportPath As String
     Dim ws As Worksheet
     Dim origForce As String, origDist As String, origHeat As String, origTemper As String
     Dim unitsChanged As Boolean
+    Dim unitWarn As String
     Dim prevCalc As XlCalculation
     Dim fastMode As Boolean
+    Dim report As String
 
     Dim label As String
-    Dim okLog As String, warnLog As String, failLog As String
-    Dim okCount As Long, warnCount As Long, failCount As Long
+    Dim okLog As String, warnLog As String, skipLog As String, failLog As String
+    Dim okCount As Long, warnCount As Long, skipCount As Long, failCount As Long
+
+    ' Re-read INPUT!J20 on every run, so a key rotated since the last run
+    ' is actually used.
+    MAPI_KEY_CACHE = ""
 
     If Len(ThisWorkbook.Path) = 0 Then
         MsgBox "Save this workbook first - it has no folder to save captures into yet.", vbCritical
@@ -206,9 +210,13 @@ Sub CaptureWingwallDisplacementContours()
         Exit Sub
     End If
 
-    If Not SetUnitSystem(origForce, CAPTURE_DIST_UNIT, origHeat, origTemper) Then
-        MsgBox "Could not switch the Unit System to " & CAPTURE_DIST_UNIT & " - aborting.", vbCritical
-        Exit Sub
+    ' A failed switch does not stop the run - the report says which units
+    ' the pictures are really in.
+    If SetUnitSystem(origForce, CAPTURE_DIST_UNIT, origHeat, origTemper) Then
+        unitWarn = UnitSwitchCheck(origForce, CAPTURE_DIST_UNIT)
+    Else
+        unitWarn = "WARNING: the switch to " & CAPTURE_DIST_UNIT & _
+                   " was rejected - the pictures show values in " & origDist & "."
     End If
     unitsChanged = True
 
@@ -237,33 +245,13 @@ Sub CaptureWingwallDisplacementContours()
         exportPath = outFolder & jobs(i).CombName & ".jpg"
         label = jobs(i).CombName & " (" & jobs(i).CompName & ")"
 
-        body = BuildCaptureBody(exportPath, jobs(i))
-
-        Call SendCaptureRequest(body, resp, statusCode)
-
-        If IsApiSuccess(statusCode, resp) Then
-
-            If WaitForFile(exportPath, 8) Then
-
-                If ReplacePictureByName(ws, jobs(i).ShapeName, exportPath) Then
-                    okCount = okCount + 1
-                    okLog = okLog & "  - " & label & vbCrLf
-                Else
-                    warnCount = warnCount + 1
-                    warnLog = warnLog & "  - " & label & ": captured, but no shape named """ & _
-                               jobs(i).ShapeName & """ found on """ & ws.Name & """" & vbCrLf
-                End If
-
-            Else
-                failCount = failCount + 1
-                failLog = failLog & "  - " & label & ": API accepted the request, but no file appeared" & _
-                          ShortApiError(resp) & vbCrLf
-            End If
-
+        If Not CaseInModel(jobs(i).CombType, jobs(i).CombName) Then
+            skipCount = skipCount + 1
+            skipLog = skipLog & "  - " & label & vbCrLf
         Else
-            failCount = failCount + 1
-            failLog = failLog & "  - " & label & ": request failed (HTTP " & statusCode & ")" & HttpStatusHint(statusCode) & _
-                      ShortApiError(resp) & vbCrLf
+            body = BuildCaptureBody(exportPath, jobs(i))
+            Call LogOutcome(CaptureToShape(ws, exportPath, body, jobs(i).ShapeName), label, _
+                            okCount, okLog, warnCount, warnLog, failCount, failLog)
         End If
 
     Next i
@@ -272,11 +260,13 @@ Sub CaptureWingwallDisplacementContours()
 
     If fastMode Then Call EndFastMode(prevCalc)
 
-    MsgBox "Wingwall displacement contour capture  [" & SCRIPT_VERSION & "]" & vbCrLf & vbCrLf & _
-           BuildSummaryReport(okCount + warnCount + failCount, okCount, warnCount, failCount, _
-                               okLog, warnLog, failLog) & _
-           vbCrLf & RestoreUnitsAndReport(origForce, origDist, origHeat, origTemper), _
-           IIf(failCount > 0, vbExclamation, vbInformation)
+    report = "Wingwall displacement contour capture  [" & SCRIPT_VERSION & "]" & vbCrLf & _
+             RestoreUnitsAndReport(origForce, origDist, origHeat, origTemper) & vbCrLf
+    If Len(unitWarn) > 0 Then report = report & unitWarn & vbCrLf
+    report = report & vbCrLf & BuildSummaryReport(okCount, warnCount, skipCount, failCount, _
+                                                  okLog, warnLog, skipLog, failLog)
+
+    MsgBox FitReport(report, SCRIPT_ID), IIf(failCount > 0, vbExclamation, vbInformation)
 
     Exit Sub
 
@@ -295,25 +285,30 @@ RestoreUnitsAndFail:
 End Sub
 
 
-' Builds the MsgBox report text: a one-line summary, then results grouped
-' by outcome (OK / WARNINGS / FAILED) instead of interleaved in job order -
-' scans far faster than a flat chronological log, especially once there
-' are failures mixed in with successes.
-Private Function BuildSummaryReport(ByVal totalCount As Long, ByVal okCount As Long, _
-                                    ByVal warnCount As Long, ByVal failCount As Long, _
+' Builds the report body: a one-line summary, then results grouped by
+' outcome - FAILED first, then WARNINGS, SKIPPED and OK - instead of
+' interleaved in job order.
+Private Function BuildSummaryReport(ByVal okCount As Long, ByVal warnCount As Long, _
+                                    ByVal skipCount As Long, ByVal failCount As Long, _
                                     ByVal okLog As String, ByVal warnLog As String, _
-                                    ByVal failLog As String) As String
+                                    ByVal skipLog As String, ByVal failLog As String) As String
 
     Dim r As String
+    Dim totalCount As Long
+
+    totalCount = okCount + warnCount + skipCount + failCount
 
     r = totalCount & " capture" & IIf(totalCount = 1, "", "s") & ": " & okCount & " OK"
-    If warnCount > 0 Then r = r & ", " & warnCount & " warning" & IIf(warnCount = 1, "", "s")
     If failCount > 0 Then r = r & ", " & failCount & " failed"
+    If warnCount > 0 Then r = r & ", " & warnCount & " warning" & IIf(warnCount = 1, "", "s")
+    If skipCount > 0 Then r = r & ", " & skipCount & " skipped"
     r = r & vbCrLf & String(40, "-")
 
-    If okCount > 0 Then r = r & vbCrLf & vbCrLf & "OK:" & vbCrLf & okLog
+    ' Most important first: MsgBox cuts a long report off at the bottom.
+    If failCount > 0 Then r = r & vbCrLf & vbCrLf & "FAILED:" & vbCrLf & failLog
     If warnCount > 0 Then r = r & vbCrLf & "WARNINGS:" & vbCrLf & warnLog
-    If failCount > 0 Then r = r & vbCrLf & "FAILED:" & vbCrLf & failLog
+    If skipCount > 0 Then r = r & vbCrLf & "SKIPPED (not in this model):" & vbCrLf & skipLog
+    If okCount > 0 Then r = r & vbCrLf & "OK:" & vbCrLf & okLog
 
     BuildSummaryReport = r
 
@@ -530,6 +525,13 @@ Private Function ElementListToJsonArray(ByVal listStr As String) As String
     For i = LBound(tokens) To UBound(tokens)
         tok = Trim(tokens(i))
         If Len(tok) > 0 Then
+            ' A typo would otherwise go into the JSON as-is and come back
+            ' as MIDAS's generic "second query is wrong".
+            If Not IsElementToken(tok) Then
+                Err.Raise vbObjectError + 514, "ElementListToJsonArray", _
+                    "Element list entry """ & tok & """ is not a number or an AtoB / " & _
+                    "AtoBbyN range. Check the element list cell. Full list: " & listStr
+            End If
             toPos = InStr(1, tok, "to", vbTextCompare)
             If toPos > 0 Then
                 startNum = CLng(Left(tok, toPos - 1))
@@ -597,8 +599,9 @@ End Function
 
 ' ===========================================================================
 '  UNIT SYSTEM (db/UNIT)
-'  "Unit System" JSON Manual, ed. 2024.08.01. GET returns {"UNIT": {FORCE,
-'  DIST, HEAT, TEMPER}} flat; PUT expects {"Assign": {"1": {...}}}.
+'  "Unit System" JSON Manual, ed. 2024.08.01. GET and PUT use the same
+'  nesting: {"UNIT": {"1": {FORCE, DIST, HEAT, TEMPER}}} back, and
+'  {"Assign": {"1": {...}}} to write (confirmed live 2026-09-22).
 ' ===========================================================================
 
 ' Reads the model's current FORCE/DIST/HEAT/TEMPER units. Returns False if
@@ -643,7 +646,9 @@ Private Function SetUnitSystem(ByVal force As String, ByVal dist As String, _
 
     Call SendUnitRequest("PUT", body, resp, statusCode)
 
-    SetUnitSystem = (statusCode = 200)
+    ' The body too, not just the status: MIDAS rejects with HTTP 200 plus
+    ' an {"error":...} body.
+    SetUnitSystem = IsApiSuccess(statusCode, resp)
 
 End Function
 
@@ -794,52 +799,7 @@ End Function
 Private Sub SendUnitRequest(ByVal httpMethod As String, ByVal body As String, _
                             ByRef responseText As String, ByRef statusCode As Long)
 
-    Dim url As String
-
-    url = API_BASE_URL & "/db/UNIT"
-
-    If Len(MapiKey()) = 0 Then
-        responseText = MapiKeyProblem()
-        statusCode = 0
-        Exit Sub
-    End If
-
-    If HTTP_CLIENT Is Nothing Then
-        Set HTTP_CLIENT = CreateObject("WinHttp.WinHttpRequest.5.1")
-    End If
-
-    On Error Resume Next
-
-    HTTP_CLIENT.Open httpMethod, url, False
-    HTTP_CLIENT.SetRequestHeader "MAPI-Key", MapiKey()
-    HTTP_CLIENT.SetRequestHeader "Content-Type", "application/json"
-    If Err.Number <> 0 Then
-        responseText = "WinHTTP error: " & Err.Description
-        statusCode = 0
-        Err.Clear
-        Set HTTP_CLIENT = Nothing
-        On Error GoTo 0
-        Exit Sub
-    End If
-
-    If Len(body) > 0 Then
-        HTTP_CLIENT.Send body
-    Else
-        HTTP_CLIENT.Send
-    End If
-    If Err.Number <> 0 Then
-        responseText = "WinHTTP error: " & Err.Description
-        statusCode = 0
-        Err.Clear
-        ' Never reuse a client that just failed.
-        Set HTTP_CLIENT = Nothing
-        On Error GoTo 0
-        Exit Sub
-    End If
-    On Error GoTo 0
-
-    statusCode = HTTP_CLIENT.Status
-    responseText = HTTP_CLIENT.ResponseText
+    Call SendDbRequest(httpMethod, "db/UNIT", body, responseText, statusCode)
 
 End Sub
 
@@ -848,43 +808,51 @@ End Sub
 '  EXCEL PICTURE REPLACEMENT
 ' ===========================================================================
 
-' Deletes the existing shape called shapeName on ws (if any) and inserts
-' imagePath in its place, keeping the same position/size and re-applying
-' the same name so later runs keep finding it. Returns True if a shape
-' was found and replaced; False if no such shape existed (nothing done
-' except reporting - it will not guess where to put a brand new picture).
+' Replaces the shape called shapeName on ws with imagePath, keeping its
+' position, size and name. Returns 0 when replaced; 1 when no such shape
+' exists (nothing is done - it will not guess where a new picture goes);
+' 2 when inserting the new picture failed, with the reason in errText.
+'
+' The new picture is inserted BEFORE the old one is deleted, so a failed
+' insert (a half-written or locked JPEG) leaves the old figure in place.
 Private Function ReplacePictureByName(ByVal ws As Worksheet, _
                                       ByVal shapeName As String, _
-                                      ByVal imagePath As String) As Boolean
+                                      ByVal imagePath As String, _
+                                      ByRef errText As String) As Long
 
     Dim shp As Shape
-    Dim l As Single, t As Single, w As Single, h As Single
-    Dim found As Boolean
+    Dim oldShp As Shape
     Dim newShp As Shape
-
-    found = False
 
     For Each shp In ws.Shapes
         If StrComp(shp.Name, shapeName, vbTextCompare) = 0 Then
-            l = shp.Left
-            t = shp.Top
-            w = shp.Width
-            h = shp.Height
-            shp.Delete
-            found = True
+            Set oldShp = shp
             Exit For
         End If
     Next shp
 
-    If Not found Then
-        ReplacePictureByName = False
+    If oldShp Is Nothing Then
+        ReplacePictureByName = 1
         Exit Function
     End If
 
-    Set newShp = ws.Shapes.AddPicture(imagePath, msoFalse, msoCTrue, l, t, w, h)
+    On Error Resume Next
+    Set newShp = ws.Shapes.AddPicture(imagePath, msoFalse, msoCTrue, _
+                                      oldShp.Left, oldShp.Top, oldShp.Width, oldShp.Height)
+    If Err.Number <> 0 Or newShp Is Nothing Then
+        errText = Err.Description
+        Err.Clear
+        On Error GoTo 0
+        ReplacePictureByName = 2
+        Exit Function
+    End If
+    On Error GoTo 0
+
+    ' Only now that the replacement exists.
+    oldShp.Delete
     newShp.Name = shapeName
 
-    ReplacePictureByName = True
+    ReplacePictureByName = 0
 
 End Function
 
@@ -1061,3 +1029,253 @@ Private Sub SendCaptureRequest(ByVal body As String, _
     responseText = HTTP_CLIENT.ResponseText
 
 End Sub
+
+
+' ===========================================================================
+'  CAPTURE FLOW - shared by all six capture scripts and kept byte-identical
+'  by tests/verify_no_helper_drift.py. Edit every copy together.
+' ===========================================================================
+
+' One capture, end to end. Returns "" when the picture was replaced,
+' "WARN:<why>" when the image was captured but could not be placed, and
+' "FAIL:<why>" otherwise.
+'
+' The previous run's file is deleted FIRST. The export path is the same on
+' every run, so a leftover file would satisfy WaitForFile at once and be
+' inserted as if it were new.
+Private Function CaptureToShape(ByVal ws As Worksheet, ByVal exportPath As String, _
+                                ByVal body As String, ByVal shapeName As String) As String
+
+    Dim resp As String
+    Dim statusCode As Long
+    Dim placeErr As String
+
+    If Len(Dir(exportPath)) > 0 Then
+        On Error Resume Next
+        Kill exportPath
+        Err.Clear
+        On Error GoTo 0
+        If Len(Dir(exportPath)) > 0 Then
+            CaptureToShape = "FAIL:could not delete the previous capture " & exportPath & _
+                             " - is it open in another program?"
+            Exit Function
+        End If
+    End If
+
+    Call SendCaptureRequest(body, resp, statusCode)
+
+    If Not IsApiSuccess(statusCode, resp) Then
+        CaptureToShape = "FAIL:request failed (HTTP " & statusCode & ")" & _
+                         HttpStatusHint(statusCode) & ShortApiError(resp)
+        Exit Function
+    End If
+
+    If Not WaitForFile(exportPath, 8) Then
+        CaptureToShape = "FAIL:API accepted the request, but no file appeared" & ShortApiError(resp)
+        Exit Function
+    End If
+
+    Select Case ReplacePictureByName(ws, shapeName, exportPath, placeErr)
+        Case 0
+            CaptureToShape = ""
+        Case 1
+            CaptureToShape = "WARN:captured, but no shape named """ & shapeName & _
+                             """ found on """ & ws.Name & """"
+        Case Else
+            CaptureToShape = "FAIL:captured, but inserting the picture failed, so the old " & _
+                             "figure was kept (" & placeErr & ")"
+    End Select
+
+End Function
+
+
+' Files one CaptureToShape outcome under OK / WARNINGS / FAILED.
+Private Sub LogOutcome(ByVal outcome As String, ByVal label As String, _
+                       ByRef okCount As Long, ByRef okLog As String, _
+                       ByRef warnCount As Long, ByRef warnLog As String, _
+                       ByRef failCount As Long, ByRef failLog As String)
+
+    If Len(outcome) = 0 Then
+        okCount = okCount + 1
+        okLog = okLog & "  - " & label & vbCrLf
+    ElseIf Left$(outcome, 5) = "WARN:" Then
+        warnCount = warnCount + 1
+        warnLog = warnLog & "  - " & label & ": " & Mid$(outcome, 6) & vbCrLf
+    Else
+        failCount = failCount + 1
+        failLog = failLog & "  - " & label & ": " & Mid$(outcome, 6) & vbCrLf
+    End If
+
+End Sub
+
+
+' False only when the model definitely lacks this load case / combination,
+' so the job can be reported as SKIPPED instead of failing with MIDAS's
+' generic "second query is wrong". Anything this cannot check (another case
+' type, a bare-model row with no name, a failed read) returns True and the
+' capture is simply attempted.
+'
+' Why: the culvert builder writes EQ, ATA, EQ-1 and ENV_EQ only when its
+' seismic gate is on, so on a non-seismic culvert those jobs have nothing
+' to capture.
+Private Function CaseInModel(ByVal caseType As String, ByVal caseName As String) As Boolean
+
+    Dim path As String
+    Dim resp As String
+    Dim statusCode As Long
+
+    CaseInModel = True
+    If Len(caseName) = 0 Then Exit Function
+
+    Select Case UCase$(caseType)
+        Case "ST": path = "db/STLD"
+        Case "CB": path = "db/LCOM-GEN"
+        Case Else: Exit Function
+    End Select
+
+    Call SendDbRequest("GET", path, "", resp, statusCode)
+    If Not IsApiSuccess(statusCode, resp) Then Exit Function
+
+    If InStr(1, resp, """NAME"":""" & caseName & """", vbTextCompare) = 0 And _
+       InStr(1, resp, """NAME"": """ & caseName & """", vbTextCompare) = 0 Then
+        CaseInModel = False
+    End If
+
+End Function
+
+
+' "" when the model now reports FORCE/DIST as asked, otherwise a warning
+' line for the report. The switch is read back rather than trusted - the
+' same check RestoreUnitsAndReport makes on the way out. The captures still
+' run either way; the warning says which units the pictures are really in.
+Private Function UnitSwitchCheck(ByVal wantForce As String, ByVal wantDist As String) As String
+
+    Dim f As String, d As String, h As String, t As String
+
+    If Not GetUnitSystem(f, d, h, t) Then
+        UnitSwitchCheck = "WARNING: could not read the Unit System back after switching - " & _
+                          "the values may not be in " & wantForce & "/" & wantDist & "."
+    ElseIf StrComp(f, wantForce, vbTextCompare) <> 0 Or StrComp(d, wantDist, vbTextCompare) <> 0 Then
+        UnitSwitchCheck = "WARNING: the model is in " & f & "/" & d & ", not " & wantForce & _
+                          "/" & wantDist & " - the pictures show values in " & f & "/" & d & "."
+    End If
+
+End Function
+
+
+' GET/PUT/POST/DELETE against {base url}/<path>. statusCode = 0 means the
+' request never completed. Shares the run's one WinHTTP client.
+Private Sub SendDbRequest(ByVal httpMethod As String, ByVal path As String, ByVal body As String, _
+                          ByRef responseText As String, ByRef statusCode As Long)
+
+    Dim url As String
+
+    url = API_BASE_URL & "/" & path
+
+    If Len(MapiKey()) = 0 Then
+        responseText = MapiKeyProblem()
+        statusCode = 0
+        Exit Sub
+    End If
+
+    If HTTP_CLIENT Is Nothing Then
+        Set HTTP_CLIENT = CreateObject("WinHttp.WinHttpRequest.5.1")
+    End If
+
+    On Error Resume Next
+
+    HTTP_CLIENT.Open httpMethod, url, False
+    HTTP_CLIENT.SetRequestHeader "MAPI-Key", MapiKey()
+    HTTP_CLIENT.SetRequestHeader "Content-Type", "application/json"
+    If Err.Number <> 0 Then
+        responseText = "WinHTTP error: " & Err.Description
+        statusCode = 0
+        Err.Clear
+        Set HTTP_CLIENT = Nothing
+        On Error GoTo 0
+        Exit Sub
+    End If
+
+    If Len(body) > 0 Then
+        HTTP_CLIENT.Send body
+    Else
+        HTTP_CLIENT.Send
+    End If
+    If Err.Number <> 0 Then
+        responseText = "WinHTTP error: " & Err.Description
+        statusCode = 0
+        Err.Clear
+        ' Never reuse a client that just failed.
+        Set HTTP_CLIENT = Nothing
+        On Error GoTo 0
+        Exit Sub
+    End If
+    On Error GoTo 0
+
+    statusCode = HTTP_CLIENT.Status
+    responseText = HTTP_CLIENT.ResponseText
+
+End Sub
+
+
+' True for "12", "10to13" or "1850to2285by15" (case-insensitive).
+Private Function IsElementToken(ByVal tok As String) As Boolean
+
+    Dim p() As String
+    Dim q() As String
+
+    p = Split(LCase$(tok), "to")
+    If UBound(p) = 0 Then
+        IsElementToken = IsDigits(p(0))
+        Exit Function
+    End If
+    If UBound(p) <> 1 Then Exit Function
+
+    q = Split(p(1), "by")
+    If UBound(q) > 1 Then Exit Function
+
+    IsElementToken = IsDigits(p(0)) And IsDigits(q(0))
+    If UBound(q) = 1 Then IsElementToken = IsElementToken And IsDigits(q(1))
+
+End Function
+
+
+Private Function IsDigits(ByVal s As String) As Boolean
+    IsDigits = (Len(s) > 0 And Not s Like "*[!0-9]*")
+End Function
+
+
+' MsgBox shows only about 1024 characters and silently drops the rest.
+' When the report is longer, the whole text goes to <logName>_log.txt next
+' to the workbook (or in %TEMP% if it has never been saved) and the MsgBox
+' shows the start of it plus where the rest is. Callers put the verdict
+' first, so what gets cut is the least important part.
+Private Function FitReport(ByVal report As String, ByVal logName As String) As String
+
+    Const MAX_LEN As Long = 900
+    Dim path As String
+    Dim fileNo As Integer
+
+    If Len(report) <= MAX_LEN Then
+        FitReport = report
+        Exit Function
+    End If
+
+    If Len(ThisWorkbook.Path) > 0 Then
+        path = ThisWorkbook.Path & "\" & logName & "_log.txt"
+    Else
+        path = Environ$("TEMP") & "\" & logName & "_log.txt"
+    End If
+
+    On Error Resume Next
+    fileNo = FreeFile
+    Open path For Output As #fileNo
+    Print #fileNo, report
+    Close #fileNo
+    If Err.Number <> 0 Then path = "(could not be written: " & Err.Description & ")"
+    Err.Clear
+    On Error GoTo 0
+
+    FitReport = Left$(report, MAX_LEN) & vbCrLf & "..." & vbCrLf & "Full report: " & path
+
+End Function

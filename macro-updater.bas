@@ -41,6 +41,11 @@ Option Explicit
 '   * nothing is replaced without an explicit Yes
 '   * a download with no SCRIPT_ID is refused, so a 404 body or a proxy
 '     login page can never be written into the VBA project
+'   * a download whose SCRIPT_VERSION differs from the manifest's is
+'     refused - raw.githubusercontent.com serves stale files for a few
+'     minutes after a publish
+'   * a module NEWER than the server's copy is listed as AHEAD and never
+'     replaced, so the updater cannot downgrade anything
 '
 '  HOW THIS MODULE UPDATES ITSELF
 '  Rewriting a module while one of its own procedures is on the call stack
@@ -81,11 +86,11 @@ Option Explicit
 '  CONFIG
 ' ---------------------------------------------------------------------------
 
-Private Const SCRIPT_VERSION As String = "2026-09-23e"
+Private Const SCRIPT_VERSION As String = "2026-09-23f"
 
 ' One-line summary of what changed in THIS version, shown when the updater
 ' finds itself stale. One physical line, no "|".
-Private Const SCRIPT_CHANGELOG As String = "The updater can now update itself - replaced last, after the workbook is saved, via a temporary bootstrap module run from Application.OnTime."
+Private Const SCRIPT_CHANGELOG As String = "Never downgrades a module newer than the server (AHEAD), refuses a download whose version differs from the manifest (stale GitHub cache), asks its question first so it is never cut off, and gives release-feed hints instead of Civil NX ones."
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -125,10 +130,10 @@ Public Sub CheckMidasMacroUpdates()
     Dim code As String
     Dim thisId As String, thisVer As String
     Dim latest As String, latestChangelog As String
-    Dim okLog As String, staleLog As String, skipLog As String
+    Dim okLog As String, staleLog As String, skipLog As String, aheadLog As String
     Dim okCount As Long, staleCount As Long
     Dim staleNames As String
-    Dim selfStale As Boolean, selfCompName As String, selfLog As String
+    Dim selfStale As Boolean, selfCompName As String, selfLog As String, selfLatest As String
     Dim trustMsg As String
     Dim answer As VbMsgBoxResult
     Dim report As String
@@ -160,9 +165,15 @@ Public Sub CheckMidasMacroUpdates()
                 ' replaced last, by BeginSelfUpdate. Uses the constant, not
                 ' the parsed code, since this is the code actually running.
                 latest = ManifestVersion(manifest, thisId)
-                If Len(latest) > 0 And StrComp(SCRIPT_VERSION, latest, vbTextCompare) <> 0 Then
+                If Len(latest) = 0 Or StrComp(SCRIPT_VERSION, latest, vbTextCompare) = 0 Then
+                    ' not published, or current
+                ElseIf VersionIsNewer(SCRIPT_VERSION, latest) Then
+                    aheadLog = aheadLog & "  - " & comp.Name & "  " & SCRIPT_VERSION & _
+                               "  (server has " & latest & ")" & vbCrLf
+                Else
                     selfStale = True
                     selfCompName = comp.Name
+                    selfLatest = latest
                     selfLog = "  - " & comp.Name & "  " & SCRIPT_VERSION & _
                               "  ->  " & latest & vbCrLf
                     latestChangelog = ManifestChangelog(manifest, thisId)
@@ -179,6 +190,12 @@ Public Sub CheckMidasMacroUpdates()
                 ElseIf StrComp(thisVer, latest, vbTextCompare) = 0 Then
                     okCount = okCount + 1
                     okLog = okLog & "  - " & comp.Name & "  " & thisVer & vbCrLf
+                ElseIf VersionIsNewer(thisVer, latest) Then
+                    ' Newer than the feed - e.g. pasted from the repo before
+                    ' publishing. Never offered for replacement: that would
+                    ' be a downgrade.
+                    aheadLog = aheadLog & "  - " & comp.Name & "  " & thisVer & _
+                               "  (server has " & latest & ")" & vbCrLf
                 Else
                     staleCount = staleCount + 1
                     latestChangelog = ManifestChangelog(manifest, thisId)
@@ -187,51 +204,62 @@ Public Sub CheckMidasMacroUpdates()
                     If Len(latestChangelog) > 0 Then
                         staleLog = staleLog & "      " & latestChangelog & vbCrLf
                     End If
-                    staleNames = staleNames & comp.Name & "|" & thisId & ";"
+                    ' The expected version travels with the row, so
+                    ' InstallUpdates can refuse a stale CDN copy.
+                    staleNames = staleNames & comp.Name & "|" & thisId & "|" & latest & ";"
                 End If
             End If
         Next comp
     End If
 
-    report = "MIDAS macro update check  [" & SCRIPT_VERSION & "]" & vbCrLf & _
-             String(46, "-") & vbCrLf
-
+    ' The module lists. Stale first - they are what the question is about;
+    ' MsgBox cuts a long text off at the bottom.
+    If staleCount > 0 Then report = report & "OUT OF DATE (" & staleCount & "):" & vbCrLf & staleLog & vbCrLf
+    If selfStale Then report = report & "UPDATER ITSELF (replaced last):" & vbCrLf & selfLog & vbCrLf
+    If Len(aheadLog) > 0 Then report = report & "AHEAD OF SERVER (left alone):" & vbCrLf & aheadLog & vbCrLf
+    If Len(skipLog) > 0 Then report = report & "NOT MANAGED:" & vbCrLf & skipLog & vbCrLf
     If okCount > 0 Then report = report & "UP TO DATE (" & okCount & "):" & vbCrLf & okLog
-    If staleCount > 0 Then report = report & vbCrLf & "OUT OF DATE (" & staleCount & "):" & vbCrLf & staleLog
-    If selfStale Then report = report & vbCrLf & "UPDATER ITSELF (replaced last):" & vbCrLf & selfLog
-    If Len(skipLog) > 0 Then report = report & vbCrLf & "NOT MANAGED:" & vbCrLf & skipLog
+
+    report = "MIDAS macro update check  [" & SCRIPT_VERSION & "]" & vbCrLf & _
+             String(46, "-") & vbCrLf & report
 
     If Len(trustMsg) > 0 Then
-        MsgBox report & vbCrLf & "CANNOT CHECK:" & vbCrLf & trustMsg, vbExclamation
+        MsgBox FitReport("CANNOT CHECK:" & vbCrLf & trustMsg & vbCrLf & vbCrLf & report, SCRIPT_ID), _
+               vbExclamation
         Exit Sub
     End If
 
     If staleCount = 0 And Not selfStale Then
-        If okCount = 0 Then
-            MsgBox report & vbCrLf & "No MIDAS modules found in this workbook.", vbInformation
+        If okCount = 0 And Len(aheadLog) = 0 Then
+            MsgBox FitReport("No MIDAS modules found in this workbook." & vbCrLf & vbCrLf & _
+                             report, SCRIPT_ID), vbInformation
         Else
-            MsgBox report & vbCrLf & "OK - everything is current.", vbInformation
+            MsgBox FitReport("OK - nothing to update." & vbCrLf & vbCrLf & report, SCRIPT_ID), _
+                   vbInformation
         End If
         Exit Sub
     End If
 
-    prompt = report & vbCrLf & "Replace the " & _
-             (staleCount + IIf(selfStale, 1, 0)) & " out-of-date module(s)?" & vbCrLf & vbCrLf & _
+    ' The question and its warnings FIRST: with every module stale after a
+    ' release, the list alone runs past what a MsgBox can show, and the
+    ' question used to be cut off.
+    prompt = "Replace the " & (staleCount + IIf(selfStale, 1, 0)) & _
+             " out-of-date module(s)?" & vbCrLf & vbCrLf & _
              "No local backup is taken - any per-workbook edit to a managed " & _
-             "module is lost." & vbCrLf & vbCrLf
+             "module is lost. Save your work before continuing." & vbCrLf & vbCrLf
     If selfStale Then
         prompt = prompt & "The updater itself goes LAST: the workbook is SAVED " & _
                  "automatically first, then it rewrites itself once this " & _
                  "macro has finished." & vbCrLf & vbCrLf
     End If
-    prompt = prompt & "Save your work before continuing."
+    prompt = prompt & report
 
-    answer = MsgBox(prompt, vbYesNo + vbQuestion, "MIDAS macro updater")
+    answer = MsgBox(FitReport(prompt, SCRIPT_ID), vbYesNo + vbQuestion, "MIDAS macro updater")
 
     If answer <> vbYes Then Exit Sub
 
     If staleCount > 0 Then Call InstallUpdates(staleNames)
-    If selfStale Then Call BeginSelfUpdate(selfCompName)
+    If selfStale Then Call BeginSelfUpdate(selfCompName, selfLatest)
 
 End Sub
 
@@ -240,7 +268,7 @@ End Sub
 '  INSTALL
 ' ===========================================================================
 
-' staleList is "moduleName|scriptId;" repeated. Each module's code is
+' staleList is "moduleName|scriptId|expectedVersion;" repeated. Each module's code is
 ' replaced IN PLACE, with no backup taken first (see the header comment's
 ' NO LOCAL BACKUP note) - the component is never removed and re-imported,
 ' so the module keeps its name and any references to it.
@@ -271,6 +299,15 @@ Private Sub InstallUpdates(ByVal staleList As String)
                 failCount = failCount + 1
                 failLog = failLog & "  - " & f(0) & ": downloaded text has no " & _
                           "SCRIPT_ID, refusing to install it" & vbCrLf
+            ElseIf StrComp(ConstValue(newCode, "SCRIPT_VERSION"), f(2), vbTextCompare) <> 0 Then
+                ' raw.githubusercontent.com caches for ~5 minutes after a
+                ' publish, so the manifest and a .bas can briefly disagree.
+                ' Installing the older copy would report an update that
+                ' did not happen.
+                failCount = failCount + 1
+                failLog = failLog & "  - " & f(0) & ": the server sent " & _
+                          ConstValue(newCode, "SCRIPT_VERSION") & ", not " & f(2) & _
+                          " - the release is still propagating. Try again in a few minutes." & vbCrLf
             Else
                 Set comp = Nothing
                 On Error Resume Next
@@ -299,10 +336,11 @@ Private Sub InstallUpdates(ByVal staleList As String)
         End If
     Next i
 
-    MsgBox "MIDAS macro update" & vbCrLf & String(46, "-") & vbCrLf & _
-           IIf(doneCount > 0, "UPDATED (" & doneCount & "):" & vbCrLf & doneLog, "") & _
-           IIf(failCount > 0, vbCrLf & "FAILED (" & failCount & "):" & vbCrLf & failLog, "") & _
-           vbCrLf & "Save the workbook to keep the updated code.", _
+    ' Failures first - MsgBox cuts a long text off at the bottom.
+    MsgBox FitReport("MIDAS macro update" & vbCrLf & String(46, "-") & vbCrLf & _
+           "Save the workbook to keep the updated code." & vbCrLf & vbCrLf & _
+           IIf(failCount > 0, "FAILED (" & failCount & "):" & vbCrLf & failLog & vbCrLf, "") & _
+           IIf(doneCount > 0, "UPDATED (" & doneCount & "):" & vbCrLf & doneLog, ""), SCRIPT_ID), _
            IIf(failCount > 0, vbExclamation, vbInformation)
 
 End Sub
@@ -329,7 +367,7 @@ End Function
 ' Steps 2-3: download, save, plant the bootstrap, schedule it, return.
 ' Nothing in this module is rewritten here - that happens only once this
 ' procedure and CheckMidasMacroUpdates have both finished.
-Private Sub BeginSelfUpdate(ByVal compName As String)
+Private Sub BeginSelfUpdate(ByVal compName As String, ByVal expectedVersion As String)
 
     Dim newCode As String
     Dim tempPath As String
@@ -356,6 +394,16 @@ Private Sub BeginSelfUpdate(ByVal compName As String)
     If StrComp(ConstValue(newCode, "SCRIPT_ID"), SCRIPT_ID, vbTextCompare) <> 0 Then
         MsgBox "The downloaded updater is not the updater (SCRIPT_ID is """ & _
                ConstValue(newCode, "SCRIPT_ID") & """) - refusing to install it.", _
+               vbExclamation
+        Exit Sub
+    End If
+
+    ' A stale CDN copy would otherwise be "installed" over identical code,
+    ' the workbook saved, and an update announced that never happened.
+    If StrComp(ConstValue(newCode, "SCRIPT_VERSION"), expectedVersion, vbTextCompare) <> 0 Then
+        MsgBox "The updater did not update itself: the server sent version " & _
+               ConstValue(newCode, "SCRIPT_VERSION") & ", not " & expectedVersion & "." & _
+               vbCrLf & "The release is still propagating - try again in a few minutes.", _
                vbExclamation
         Exit Sub
     End If
@@ -648,34 +696,65 @@ Private Function FetchText(ByVal url As String, ByRef outText As String) As Bool
 End Function
 
 
-' Turns a MIDAS HTTP status into something a user can act on. The codes
-' are from the API manual's own table:
-'   200 Success   - request reached the model
-'   201 Created   - POST succeeded (PUT answers 200), which is why every
-'                   status test here accepts the whole 2xx range
-'   400 Bad Request - wrong command or body
-'   403 Forbidden   - the API is not switched on for this user
-'   404 Not found   - the client never reached the API server at all
-' 404 in particular is almost never a bug in the request: it means Civil
-' NX is closed, the model is not open, or the MAPI key belongs to a
-' session that has gone away. Printing the bare number sends people
-' looking in the wrong place.
+' Turns an HTTP status from the RELEASE FEED into something a user can act
+' on. Deliberately NOT the shared MIDAS version the other eight modules
+' carry: their 404 means "Civil NX is not reachable", which is the wrong
+' advice for a GitHub address. Exempt from verify_no_helper_drift.py.
 Private Function HttpStatusHint(ByVal statusCode As Long) As String
 
     Select Case statusCode
-        Case 400
-            HttpStatusHint = " (Bad Request - the command or body is wrong.)"
         Case 403
-            HttpStatusHint = " (Forbidden - the API is not enabled. In Civil NX: " & _
-                             "Tools > API > API Setting.)"
+            HttpStatusHint = " (Forbidden - the release feed refused the request.)"
         Case 404
-            HttpStatusHint = " (Not Found - not connected to the API server. Check " & _
-                             "Civil NX is running with the model open, and that " & _
-                             "MAPI_KEY matches the key in Tools > API > API Setting.)"
+            HttpStatusHint = " (Not Found - that file is not published at UPDATE_BASE_URL. " & _
+                             "Check the address, or that the module has been released.)"
         Case 0
-            HttpStatusHint = " (No response - the request never completed.)"
+            HttpStatusHint = " (No response - check the internet connection or proxy.)"
         Case Else
             HttpStatusHint = ""
     End Select
+
+End Function
+
+
+' True when version a sorts after b. Versions are "yyyy-mm-dd" plus a
+' letter ("2026-09-23e"), which order correctly as plain text.
+Private Function VersionIsNewer(ByVal a As String, ByVal b As String) As Boolean
+    VersionIsNewer = (StrComp(a, b, vbBinaryCompare) > 0)
+End Function
+
+
+' MsgBox shows only about 1024 characters and silently drops the rest.
+' When the report is longer, the whole text goes to <logName>_log.txt next
+' to the workbook (or in %TEMP% if it has never been saved) and the MsgBox
+' shows the start of it plus where the rest is. Callers put the verdict
+' first, so what gets cut is the least important part.
+Private Function FitReport(ByVal report As String, ByVal logName As String) As String
+
+    Const MAX_LEN As Long = 900
+    Dim path As String
+    Dim fileNo As Integer
+
+    If Len(report) <= MAX_LEN Then
+        FitReport = report
+        Exit Function
+    End If
+
+    If Len(ThisWorkbook.Path) > 0 Then
+        path = ThisWorkbook.Path & "\" & logName & "_log.txt"
+    Else
+        path = Environ$("TEMP") & "\" & logName & "_log.txt"
+    End If
+
+    On Error Resume Next
+    fileNo = FreeFile
+    Open path For Output As #fileNo
+    Print #fileNo, report
+    Close #fileNo
+    If Err.Number <> 0 Then path = "(could not be written: " & Err.Description & ")"
+    Err.Clear
+    On Error GoTo 0
+
+    FitReport = Left$(report, MAX_LEN) & vbCrLf & "..." & vbCrLf & "Full report: " & path
 
 End Function

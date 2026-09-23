@@ -30,14 +30,14 @@ Option Explicit
 ' and the code actually running can silently diverge, and a fix that
 ' looks ineffective is very often just not re-imported yet. Check this
 ' matches before diagnosing anything from a report screenshot.
-Private Const SCRIPT_VERSION As String = "2026-09-23e"
+Private Const SCRIPT_VERSION As String = "2026-09-23f"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "PostPlaneLoadTypes now actually PUTs to db/PNLD (was building the body and never sending it); VerifyEmpty checks all 12 cleaned endpoints via the confirmed-live empty signal."
+Private Const SCRIPT_CHANGELOG As String = "Audit rev 2: required dimensions must be present and above 0, wall heights must clear the rigid zone, Ec fallback is reported as a WARN, long timeout for doc/ANAL, verdict first in the report, MAPI key re-read every run."
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -147,6 +147,9 @@ Private Const MATERIAL_MASS As Double = 0
 Private Const MATERIAL_ELAST_DEFAULT As Double = 26291000#  ' fallback if B19 is blank/invalid
 Private Const CELL_MATERIAL_ELAST As String = "B19"
 Private MATERIAL_ELAST As Double     ' "INPUT"!B19 (Ec), falls back to MATERIAL_ELAST_DEFAULT
+' Defaults substituted for missing inputs this run, reported as a WARN on
+' the geometry step so a fallback is never silent.
+Private INPUT_FALLBACKS As String
 
 ' Two THIK records - foundation and stem have independent thicknesses.
 Private Const SECT_FOUNDATION As Long = 1
@@ -343,12 +346,10 @@ Private ELEM_SETS_READY As Boolean
 '  into FOUND_IDS, not hardcoded, because the divide renumbers nothing but
 '  adds a sub-element per cell.
 '
-'  UNVERIFIED LIVE: with BOUNDARY.TYPE "LINEAR" the doc calls STIFF
-'  simply "Stiffness [Kx, Ky, Kz]" while the COMP/TENS forms name their
-'  single value "Modulus of Subgrade Reaction". Civil NX's Surface Spring
-'  dialog labels the linear boxes as moduli, which is what kv is - but
-'  check the resulting db/NSPR values against kv x tributary area on the
-'  first live run before trusting the magnitudes.
+'  STIFF IS A MODULUS - confirmed live 2026-09-22. The doc calls it just
+'  "Stiffness [Kx, Ky, Kz]", but on a 2 m x 5 m plate STIFF [500,500,1000]
+'  gave nodal SDz summing to 10000 = kv x area, not 1000. MIDAS applies the
+'  tributary area itself, so kv is passed straight through.
 ' ---------------------------------------------------------------------------
 Private Const CELL_SUBGRADE_MODULUS As String = "B8"
 Private Const SPRING_H_RATIO As Double = 0.5
@@ -383,13 +384,10 @@ Private SPRING_KV As Double
 '  which predates it; its own page is "UCS"/[NUCS] Named UCS on the support
 '  site. Looking for "UCS" in the endpoint list finds nothing - it is NUCS.
 '
-'  STILL OPEN: whether the capture's UCS_NAME accepts this name. The Plate
-'  Forces doc's enum lists only the literal "CurrentUCS", and nothing
-'  readable says which UCS is current - there is no info/view/* endpoint
-'  (404) and GET view/RESULTGRAPHIC returns "error status" without results.
-'  The capture script sends the name first; if the foundation pictures come
-'  back unrotated, select this UCS by hand in Civil NX and switch that
-'  script's UCS_NAME_FOR_RESULTS back to "CurrentUCS".
+'  The capture's UCS_NAME accepts this name, although the Plate Forces
+'  doc's enum lists only "CurrentUCS" - confirmed live 2026-09-22 and again
+'  on the real wingwall 2026-09-23 (values under "FOUND" differ from
+'  "CurrentUCS"/"Local").
 ' ---------------------------------------------------------------------------
 Private Const UCS_NAME As String = "FOUND"
 Private GEO_LEFT_ANGLE_DEG As Double
@@ -649,16 +647,12 @@ Sub BuildWingwallModel()
     If ok Then ok = StepResult(report, Progress("Foundation Springs"), PostFoundationSprings())
     If ok Then ok = StepResult(report, Progress("Perform Analysis"), PostPerformAnalysis())
 
-    If ok Then
-        report = report & vbCrLf & "All steps completed."
-    Else
-        report = report & vbCrLf & "Stopped after the first failed step - fix it and re-run."
-    End If
+    report = VerdictFirst(report, ok)
 
     ' Before the MsgBox, and on the failure path too - see ClearProgress.
     Call ClearProgress
 
-    MsgBox report, IIf(ok, vbInformation, vbExclamation)
+    MsgBox FitReport(report, SCRIPT_ID), IIf(ok, vbInformation, vbExclamation)
 
 End Sub
 
@@ -701,12 +695,9 @@ End Sub
 ' db/CO_T is deliberately absent: GET and PUT are its only active methods,
 ' so there is nothing to delete. Colours are simply overwritten.
 '
-' UNVERIFIED LIVE: every endpoint below is documented "Active Methods:
-' POST, GET, PUT, DELETE", so DELETE itself is real - but no doc page shows
-' a worked DELETE JSON example the way they do for POST/PUT. Whether a
-' keyless DELETE (this script's assumption, extending the documented GET
-' convention: no key = whole endpoint) wipes every record, or needs each key
-' named, is what the VerifyEmpty read-back in BuildWingwallModel checks.
+' A keyless DELETE clears the whole endpoint - confirmed live 2026-09-22 on
+' db/NSPR, db/ELEM, db/NODE, db/THIK, db/MATL, db/PNLD and db/NUCS. The
+' VerifyEmpty read-back in BuildWingwallModel still checks every run.
 Private Sub RunCleanSteps(ByRef report As String)
 
     Call StepResult(report, Progress("delete Load Combinations"), DeleteAndCheck("db/LCOM-GEN"))
@@ -731,6 +722,9 @@ End Sub
 
 Private Sub ResetProgress(ByVal total As Long)
     PROGRESS_STEP = 0
+    ' Re-read INPUT!J20 on every run, so a key rotated since the last run
+    ' is actually used.
+    MAPI_KEY_CACHE = ""
     PROGRESS_TOTAL = IIf(total < 1, 1, total)
     ' Paired with ClearProgress, which already runs on every exit path.
     ' ScreenUpdating only: EnableEvents and Calculation are deliberately NOT
@@ -1049,7 +1043,11 @@ Private Function PostGeometrySetup() As String
 
     GenerateGeometry openingWidth, THICKNESS_STEM_VALUE, leftSide, rightSide
 
-    PostGeometrySetup = ""
+    If Len(INPUT_FALLBACKS) > 0 Then
+        PostGeometrySetup = "WARN: used built-in defaults -" & INPUT_FALLBACKS
+    Else
+        PostGeometrySetup = ""
+    End If
 
 End Function
 
@@ -1093,15 +1091,15 @@ Private Function ReadLoadInputs() As String
     If Len(ReadLoadInputs) > 0 Then Exit Function
 
     If Not TryReadCell(ws, CELL_SURCHARGE_LEFT, LOAD_SURCHARGE_LEFT) Then
-        ReadLoadInputs = "Non-numeric or empty cell: " & CELL_SURCHARGE_LEFT & " (LEFT LS surcharge pressure)"
+        ReadLoadInputs = "Non-numeric cell: " & CELL_SURCHARGE_LEFT & " (LEFT LS surcharge pressure)"
         Exit Function
     End If
     If Not TryReadCell(ws, CELL_SURCHARGE_RIGHT, LOAD_SURCHARGE_RIGHT) Then
-        ReadLoadInputs = "Non-numeric or empty cell: " & CELL_SURCHARGE_RIGHT & " (RIGHT LS surcharge pressure)"
+        ReadLoadInputs = "Non-numeric cell: " & CELL_SURCHARGE_RIGHT & " (RIGHT LS surcharge pressure)"
         Exit Function
     End If
     If Not TryReadCell(ws, CELL_SEISMIC_COEF, LOAD_SEISMIC_COEF) Then
-        ReadLoadInputs = "Non-numeric or empty cell: " & CELL_SEISMIC_COEF & " (seismic inertia coefficient)"
+        ReadLoadInputs = "Non-numeric cell: " & CELL_SEISMIC_COEF & " (seismic inertia coefficient)"
         Exit Function
     End If
     ' Round the inertia coefficient to 3 decimals. The sheet usually
@@ -1126,19 +1124,19 @@ Private Function ReadLoadRow(ByVal ws As Worksheet, ByVal rowNo As Long, _
                              ByVal label As String) As String
 
     If Not TryReadCell(ws, "B" & rowNo, v1) Then
-        ReadLoadRow = "Non-numeric or empty cell: B" & rowNo & " (" & label & ", bottom near)"
+        ReadLoadRow = "Non-numeric cell: B" & rowNo & " (" & label & ", bottom near)"
         Exit Function
     End If
     If Not TryReadCell(ws, "C" & rowNo, v2) Then
-        ReadLoadRow = "Non-numeric or empty cell: C" & rowNo & " (" & label & ", bottom far)"
+        ReadLoadRow = "Non-numeric cell: C" & rowNo & " (" & label & ", bottom far)"
         Exit Function
     End If
     If Not TryReadCell(ws, "D" & rowNo, v3) Then
-        ReadLoadRow = "Non-numeric or empty cell: D" & rowNo & " (" & label & ", top far)"
+        ReadLoadRow = "Non-numeric cell: D" & rowNo & " (" & label & ", top far)"
         Exit Function
     End If
     If Not TryReadCell(ws, "E" & rowNo, v4) Then
-        ReadLoadRow = "Non-numeric or empty cell: E" & rowNo & " (" & label & ", top near)"
+        ReadLoadRow = "Non-numeric cell: E" & rowNo & " (" & label & ", top near)"
         Exit Function
     End If
 
@@ -1161,58 +1159,46 @@ Private Function ReadWingwallInputs(ByRef openingWidth As Double, ByRef foundati
         Exit Function
     End If
 
-    If Not TryReadCell(ws, CELL_OPENING_WIDTH, openingWidth) Then
-        ReadWingwallInputs = "Non-numeric or empty cell: " & CELL_OPENING_WIDTH & " (opening width)"
-        Exit Function
-    End If
-    If Not TryReadCell(ws, CELL_STEM_THICKNESS, stemThickness) Then
-        ReadWingwallInputs = "Non-numeric or empty cell: " & CELL_STEM_THICKNESS & " (stem thickness)"
-        Exit Function
-    End If
-    If Not TryReadCell(ws, CELL_FOUNDATION_THICKNESS, foundationThickness) Then
-        ReadWingwallInputs = "Non-numeric or empty cell: " & CELL_FOUNDATION_THICKNESS & " (foundation thickness)"
-        Exit Function
-    End If
+    ReadWingwallInputs = RequirePositive(ws, CELL_OPENING_WIDTH, "opening width", openingWidth)
+    If Len(ReadWingwallInputs) > 0 Then Exit Function
+    ReadWingwallInputs = RequirePositive(ws, CELL_STEM_THICKNESS, "stem thickness", stemThickness)
+    If Len(ReadWingwallInputs) > 0 Then Exit Function
+    ReadWingwallInputs = RequirePositive(ws, CELL_FOUNDATION_THICKNESS, "foundation thickness", foundationThickness)
+    If Len(ReadWingwallInputs) > 0 Then Exit Function
 
-    If Not TryReadCell(ws, CELL_LEFT_LENGTH, leftSide.L) Then
-        ReadWingwallInputs = "Non-numeric or empty cell: " & CELL_LEFT_LENGTH & " (LEFT length)"
-        Exit Function
-    End If
-    If Not TryReadCell(ws, CELL_LEFT_ANGLE, leftSide.AngleDeg) Then
-        ReadWingwallInputs = "Non-numeric or empty cell: " & CELL_LEFT_ANGLE & " (LEFT angle)"
-        Exit Function
-    End If
-    If Not TryReadCell(ws, CELL_LEFT_HNEAR, leftSide.Hnear) Then
-        ReadWingwallInputs = "Non-numeric or empty cell: " & CELL_LEFT_HNEAR & " (LEFT height @ face)"
-        Exit Function
-    End If
-    If Not TryReadCell(ws, CELL_LEFT_HFAR, leftSide.Hfar) Then
-        ReadWingwallInputs = "Non-numeric or empty cell: " & CELL_LEFT_HFAR & " (LEFT height @ tip)"
-        Exit Function
-    End If
+    ReadWingwallInputs = RequirePositive(ws, CELL_LEFT_LENGTH, "LEFT length", leftSide.L)
+    If Len(ReadWingwallInputs) > 0 Then Exit Function
+    ReadWingwallInputs = RequireNumber(ws, CELL_LEFT_ANGLE, "LEFT angle", leftSide.AngleDeg)
+    If Len(ReadWingwallInputs) > 0 Then Exit Function
+    ReadWingwallInputs = RequirePositive(ws, CELL_LEFT_HNEAR, "LEFT height @ face", leftSide.Hnear)
+    If Len(ReadWingwallInputs) > 0 Then Exit Function
+    ReadWingwallInputs = RequirePositive(ws, CELL_LEFT_HFAR, "LEFT height @ tip", leftSide.Hfar)
+    If Len(ReadWingwallInputs) > 0 Then Exit Function
 
-    If Not TryReadCell(ws, CELL_RIGHT_LENGTH, rightSide.L) Then
-        ReadWingwallInputs = "Non-numeric or empty cell: " & CELL_RIGHT_LENGTH & " (RIGHT length)"
-        Exit Function
-    End If
-    If Not TryReadCell(ws, CELL_RIGHT_ANGLE, rightSide.AngleDeg) Then
-        ReadWingwallInputs = "Non-numeric or empty cell: " & CELL_RIGHT_ANGLE & " (RIGHT angle)"
-        Exit Function
-    End If
-    If Not TryReadCell(ws, CELL_RIGHT_HNEAR, rightSide.Hnear) Then
-        ReadWingwallInputs = "Non-numeric or empty cell: " & CELL_RIGHT_HNEAR & " (RIGHT height @ face)"
-        Exit Function
-    End If
-    If Not TryReadCell(ws, CELL_RIGHT_HFAR, rightSide.Hfar) Then
-        ReadWingwallInputs = "Non-numeric or empty cell: " & CELL_RIGHT_HFAR & " (RIGHT height @ tip)"
-        Exit Function
-    End If
+    ReadWingwallInputs = RequirePositive(ws, CELL_RIGHT_LENGTH, "RIGHT length", rightSide.L)
+    If Len(ReadWingwallInputs) > 0 Then Exit Function
+    ReadWingwallInputs = RequireNumber(ws, CELL_RIGHT_ANGLE, "RIGHT angle", rightSide.AngleDeg)
+    If Len(ReadWingwallInputs) > 0 Then Exit Function
+    ReadWingwallInputs = RequirePositive(ws, CELL_RIGHT_HNEAR, "RIGHT height @ face", rightSide.Hnear)
+    If Len(ReadWingwallInputs) > 0 Then Exit Function
+    ReadWingwallInputs = RequirePositive(ws, CELL_RIGHT_HFAR, "RIGHT height @ tip", rightSide.Hfar)
+    If Len(ReadWingwallInputs) > 0 Then Exit Function
 
     ' Ec is not required to build - falls back to MATERIAL_ELAST_DEFAULT
     ' if B19 is blank/invalid, same non-blocking pattern as
     ' midas-culvert-model-build.bas's B43 read.
+    ' The stem's 2-row split (GenerateGeometry) degenerates when a wall is
+    ' not taller than its rigid zone, so refuse that before anything posts.
+    ReadWingwallInputs = RigidZoneProblem("LEFT", leftSide, stemThickness)
+    If Len(ReadWingwallInputs) > 0 Then Exit Function
+    ReadWingwallInputs = RigidZoneProblem("RIGHT", rightSide, stemThickness)
+    If Len(ReadWingwallInputs) > 0 Then Exit Function
+
+    INPUT_FALLBACKS = ""
     If Not TryReadCell(ws, CELL_MATERIAL_ELAST, MATERIAL_ELAST) Or MATERIAL_ELAST <= 0 Then
         MATERIAL_ELAST = MATERIAL_ELAST_DEFAULT
+        INPUT_FALLBACKS = INPUT_FALLBACKS & " Ec (" & INPUT_SHEET_NAME & "!" & CELL_MATERIAL_ELAST & _
+                          ") missing or <= 0, used " & JsonNum(MATERIAL_ELAST_DEFAULT) & "."
     End If
 
     ' Subgrade modulus, likewise non-blocking: a model without it simply
@@ -1256,6 +1242,67 @@ Private Function TryReadCell(ByVal ws As Worksheet, ByVal addr As String, ByRef 
     End If
     result = CDbl(ws.Range(addr).Value)
     TryReadCell = True
+End Function
+
+' "" when addr holds a number > 0, otherwise a message naming the cell.
+' TryReadCell accepts a blank cell as 0 - right for an optional feature
+' switch, wrong for a thickness or a span, which would build a degenerate
+' model with no error from MIDAS.
+Private Function RequirePositive(ByVal ws As Worksheet, ByVal addr As String, _
+                                 ByVal label As String, ByRef result As Double) As String
+
+    Dim v As Variant
+
+    v = ws.Range(addr).Value
+
+    If IsEmpty(v) Or IsError(v) Then
+        RequirePositive = ws.Name & "!" & addr & " (" & label & ") is blank or an error value."
+    ElseIf Not IsNumeric(v) Then
+        RequirePositive = ws.Name & "!" & addr & " (" & label & ") is not a number."
+    ElseIf CDbl(v) <= 0 Then
+        RequirePositive = ws.Name & "!" & addr & " (" & label & ") must be greater than 0."
+    Else
+        result = CDbl(v)
+    End If
+
+End Function
+
+' Like RequirePositive, but 0 and negative values are fine - for the splay
+' angles, where 0 is a real geometry but a blank cell is not.
+Private Function RequireNumber(ByVal ws As Worksheet, ByVal addr As String, _
+                               ByVal label As String, ByRef result As Double) As String
+
+    Dim v As Variant
+
+    v = ws.Range(addr).Value
+
+    If IsEmpty(v) Or IsError(v) Then
+        RequireNumber = ws.Name & "!" & addr & " (" & label & ") is blank or an error value."
+    ElseIf Not IsNumeric(v) Then
+        RequireNumber = ws.Name & "!" & addr & " (" & label & ") is not a number."
+    Else
+        result = CDbl(v)
+    End If
+
+End Function
+
+' "" when both of a wall's heights clear its rigid zone, otherwise the
+' message. GenerateGeometry's stem is a flat rigid band up to
+' RIGID_ZONE_RATIO x stem thickness plus a sloped band above it; a wall no
+' taller than the band gives zero-height or inverted plates.
+Private Function RigidZoneProblem(ByVal side As String, ByRef p As SideParams, _
+                                  ByVal stemThickness As Double) As String
+
+    Dim rz As Double
+
+    rz = RIGID_ZONE_RATIO * stemThickness
+
+    If p.Hnear <= rz Or p.Hfar <= rz Then
+        RigidZoneProblem = side & " wall: heights " & JsonNum(p.Hnear) & " (face) / " & _
+            JsonNum(p.Hfar) & " (tip) must both exceed the rigid-zone height " & _
+            JsonNum(rz) & " (RIGID_ZONE_RATIO x stem thickness)."
+    End If
+
 End Function
 
 ' Computes the 20-node / 9-element geometry into NODE_LIST/ELEMENT_LIST
@@ -2708,6 +2755,17 @@ Private Sub SendApiRequest(ByVal httpMethod As String, ByVal path As String, ByV
 
     On Error Resume Next
 
+    ' resolve, connect, send, receive (ms). A long receive timeout ONLY for
+    ' the solve and the request right after it (post/TABLE reads the fresh
+    ' results): doc/ANAL is synchronous and a real model can take longer
+    ' than WinHTTP's 30 s default. Everything else keeps the defaults, set
+    ' explicitly because the one client is reused across calls.
+    If path = "doc/ANAL" Or path = "post/TABLE" Then
+        HTTP_CLIENT.SetTimeouts 0, 60000, 30000, 600000
+    Else
+        HTTP_CLIENT.SetTimeouts 0, 60000, 30000, 30000
+    End If
+
     HTTP_CLIENT.Open httpMethod, url, False
     HTTP_CLIENT.SetRequestHeader "MAPI-Key", MapiKey()
     HTTP_CLIENT.SetRequestHeader "Content-Type", "application/json"
@@ -2894,5 +2952,67 @@ Private Function HttpStatusHint(ByVal statusCode As Long) As String
         Case Else
             HttpStatusHint = ""
     End Select
+
+End Function
+
+
+' Moves the verdict to the top of the report, right under the title line.
+' MsgBox shows only about 1024 characters, and the failing step used to be
+' the LAST line - the first thing to be cut off. The failure is the last
+' "FAIL - " entry: the clean pass runs first, so any FAIL lines it logged
+' come earlier.
+Private Function VerdictFirst(ByVal report As String, ByVal ok As Boolean) As String
+
+    Dim verdict As String
+    Dim p As Long
+
+    If ok Then
+        verdict = "All steps completed."
+    Else
+        p = InStrRev(report, "FAIL - ")
+        If p > 0 Then
+            verdict = "STOPPED - " & Mid$(report, p) & "Fix it and re-run."
+        Else
+            verdict = "STOPPED after a failed step - fix it and re-run."
+        End If
+    End If
+
+    VerdictFirst = Replace(report, vbCrLf, vbCrLf & verdict & vbCrLf & vbCrLf, 1, 1)
+
+End Function
+
+
+' MsgBox shows only about 1024 characters and silently drops the rest.
+' When the report is longer, the whole text goes to <logName>_log.txt next
+' to the workbook (or in %TEMP% if it has never been saved) and the MsgBox
+' shows the start of it plus where the rest is. Callers put the verdict
+' first, so what gets cut is the least important part.
+Private Function FitReport(ByVal report As String, ByVal logName As String) As String
+
+    Const MAX_LEN As Long = 900
+    Dim path As String
+    Dim fileNo As Integer
+
+    If Len(report) <= MAX_LEN Then
+        FitReport = report
+        Exit Function
+    End If
+
+    If Len(ThisWorkbook.Path) > 0 Then
+        path = ThisWorkbook.Path & "\" & logName & "_log.txt"
+    Else
+        path = Environ$("TEMP") & "\" & logName & "_log.txt"
+    End If
+
+    On Error Resume Next
+    fileNo = FreeFile
+    Open path For Output As #fileNo
+    Print #fileNo, report
+    Close #fileNo
+    If Err.Number <> 0 Then path = "(could not be written: " & Err.Description & ")"
+    Err.Clear
+    On Error GoTo 0
+
+    FitReport = Left$(report, MAX_LEN) & vbCrLf & "..." & vbCrLf & "Full report: " & path
 
 End Function
