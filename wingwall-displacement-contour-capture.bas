@@ -27,7 +27,7 @@ Option Explicit
 ' hand, so the file in the repo and the code actually running can silently
 ' diverge - check this stamp matches the constant here before concluding
 ' anything from a run. Bump it whenever this file changes.
-Private Const SCRIPT_VERSION As String = "2026-09-23d"
+Private Const SCRIPT_VERSION As String = "2026-09-23e"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the

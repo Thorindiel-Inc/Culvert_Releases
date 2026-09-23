@@ -26,7 +26,7 @@ Option Explicit
 ' hand, so the file in the repo and the code actually running can silently
 ' diverge - check this stamp matches the constant here before concluding
 ' anything from a run. Bump it whenever this file changes.
-Private Const SCRIPT_VERSION As String = "2026-09-23d"
+Private Const SCRIPT_VERSION As String = "2026-09-23e"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -232,6 +232,21 @@ Sub CaptureLoadDiagrams()
         End If
 
         exportPath = outFolder & "'" & jobs(i).FileName & ".jpg"
+
+        ' Explicit view/DISPLAY call, in addition to the inline
+        ' DISPLAY.BOUNDARY field in the capture body itself - the inline
+        ' field alone was not enough live: boundary/spring symbols set by
+        ' an earlier capture kept showing on later ones even when this
+        ' job's own body asked for them off. Same belt-and-braces pattern
+        ' as SendActiveAllRequest in the displacement-contour script (see
+        ' CLAUDE.md). Not fatal if it fails - the inline field is still
+        ' sent as a fallback, so a WARN is enough.
+        Dim dispResult As String
+        dispResult = SendDisplayBoundaryRequest(Len(jobs(i).CaseType) = 0)
+        If Len(dispResult) > 0 Then
+            resultsLog = resultsLog & logLabel & _
+                         ": WARN - view/DISPLAY boundary toggle failed: " & dispResult & vbCrLf
+        End If
 
         body = BuildLoadCaptureBody(exportPath, jobs(i))
 
@@ -906,6 +921,76 @@ Private Function WaitForFile(ByVal filePath As String, ByVal timeoutSeconds As L
     Loop
 
     WaitForFile = True
+
+End Function
+
+
+' Explicitly sets the boundary/spring display toggle in Civil NX via
+' view/DISPLAY (a separate POST endpoint from view/CAPTURE - see the
+' "Display" JSON Manual, ed. 2024.10.25). Confirmed live 2026-09-23:
+' the DISPLAY.BOUNDARY field embedded in the capture body alone did not
+' reliably turn springs off on later captures once an earlier capture had
+' turned them on, so this makes it an explicit standalone toggle instead
+' of trusting the per-capture field to fully reset the session's display
+' state. Called once per job, right before the capture request, so the
+' bare-model row shows springs and every load-case row explicitly hides
+' them - same belt-and-braces pattern as SendActiveAllRequest in
+' midas-culvert-displacement-contour-capture.bas.
+'
+' Returns "" on success (2xx, no "error" key), else a short failure
+' message - same convention as SendCaptureRequest/ShortApiError. Not
+' fatal if it fails: the caller logs a WARN and the capture loop
+' continues, since the inline DISPLAY.BOUNDARY field is still sent as a
+' fallback.
+Private Function SendDisplayBoundaryRequest(ByVal showBoundary As Boolean) As String
+
+    Dim url As String
+    Dim body As String
+    Dim resp As String
+    Dim statusCode As Long
+
+    url = API_BASE_URL & "/view/DISPLAY"
+    body = "{""Argument"": {""BOUNDARY"": {"
+    body = body & """SUPPORT"": " & LCase(showBoundary) & ","
+    body = body & """POINT_SPRING_SUPPORT"": " & LCase(showBoundary)
+    body = body & "}}}"
+
+    If HTTP_CLIENT Is Nothing Then
+        Set HTTP_CLIENT = CreateObject("WinHttp.WinHttpRequest.5.1")
+    End If
+
+    On Error Resume Next
+
+    HTTP_CLIENT.Open "POST", url, False
+    HTTP_CLIENT.SetRequestHeader "MAPI-Key", MapiKey()
+    HTTP_CLIENT.SetRequestHeader "Content-Type", "application/json"
+    If Err.Number <> 0 Then
+        SendDisplayBoundaryRequest = "WinHTTP error: " & Err.Description
+        Err.Clear
+        Set HTTP_CLIENT = Nothing
+        On Error GoTo 0
+        Exit Function
+    End If
+
+    HTTP_CLIENT.Send body
+    If Err.Number <> 0 Then
+        SendDisplayBoundaryRequest = "WinHTTP error: " & Err.Description
+        Err.Clear
+        ' Never reuse a client that just failed.
+        Set HTTP_CLIENT = Nothing
+        On Error GoTo 0
+        Exit Function
+    End If
+    On Error GoTo 0
+
+    statusCode = HTTP_CLIENT.Status
+    resp = HTTP_CLIENT.ResponseText
+
+    If statusCode >= 200 And statusCode < 300 And InStr(1, resp, """error""", vbTextCompare) = 0 Then
+        SendDisplayBoundaryRequest = ""
+    Else
+        SendDisplayBoundaryRequest = "HTTP " & statusCode & HttpStatusHint(statusCode) & ShortApiError(resp)
+    End If
 
 End Function
 
