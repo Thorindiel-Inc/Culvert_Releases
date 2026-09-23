@@ -5,7 +5,7 @@ culvert-beam-diagram-capture|2026-09-23f|Shares all six captures' unified JSON h
 culvert-displacement-contour-capture|2026-09-23f|Forces every element active via ACTIVE_MODE All (inline plus a standalone view/ACTIVE call) before capturing; shares the six captures' unified helpers and Part 1 fixes.
 culvert-load-diagram-capture|2026-09-23f|Boundary (point spring/support) is now set explicitly per job via a standalone view/DISPLAY call, not just the inline capture field - only the bare-model row keeps springs visible.
 culvert-model-build|2026-09-23e|EQ-1 no longer references ATA - only DL/EV2/EHA2_L/EHA2_R/EQ. ATA is still built and self-weighted, just not combined.
-macro-updater|2026-09-23d|Added changelog display - stale modules now show a one-line summary of what changed, from manifest.txt and from each downloaded module's own SCRIPT_CHANGELOG.
+macro-updater|2026-09-23e|The updater can now update itself - replaced last, after the workbook is saved, via a temporary bootstrap module run from Application.OnTime.
 wingwall-displacement-contour-capture|2026-09-23f|Shares all six captures' unified JSON helpers (escape-aware extractor, AtoBbyN range parser), IsApiSuccess gate, non-blocking wait and reused WinHTTP client.
 wingwall-load-diagram-capture|2026-09-23f|Shares all six captures' unified JSON helpers (escape-aware extractor, AtoBbyN range parser), IsApiSuccess gate, non-blocking wait and reused WinHTTP client.
 wingwall-model-build|2026-09-23e|PostPlaneLoadTypes now actually PUTs to db/PNLD (was building the body and never sending it); VerifyEmpty checks all 12 cleaned endpoints via the confirmed-live empty signal.

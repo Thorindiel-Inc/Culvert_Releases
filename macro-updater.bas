@@ -39,10 +39,23 @@ Option Explicit
 '
 '  SAFETY
 '   * nothing is replaced without an explicit Yes
-'   * this module never replaces itself (a module cannot rewrite its own
-'     code while that code is running)
 '   * a download with no SCRIPT_ID is refused, so a 404 body or a proxy
 '     login page can never be written into the VBA project
+'
+'  HOW THIS MODULE UPDATES ITSELF
+'  Rewriting a module while one of its own procedures is on the call stack
+'  can crash Excel or corrupt the VBA project, so this module is never
+'  touched by InstallUpdates. Instead, when it is itself stale:
+'    1. every other stale module is replaced first, as normal
+'    2. its new code is downloaded to a temp file and the workbook is SAVED
+'       - so if anything below goes wrong, nothing else is lost
+'    3. a throwaway module (BOOTSTRAP_MODULE) is added and scheduled with
+'       Application.OnTime, and this macro returns
+'    4. the bootstrap runs from Excel's idle loop, with no code from this
+'       module running, and rewrites this module from the temp file
+'    5. it then schedules FinishMidasSelfUpdate - which is the NEW code -
+'       to delete the bootstrap and report
+'  A bootstrap left behind by a crash is removed on the next check.
 '
 '  NO LOCAL BACKUP IS TAKEN BEFORE REPLACING. The published .bas files are
 '  themselves the record of what a module looked like at any point - this
@@ -68,13 +81,11 @@ Option Explicit
 '  CONFIG
 ' ---------------------------------------------------------------------------
 
-Private Const SCRIPT_VERSION As String = "2026-09-23d"
+Private Const SCRIPT_VERSION As String = "2026-09-23e"
 
-' One-line summary of what changed in THIS version. This module is the
-' one exception that never gets to SHOW its own changelog (it never
-' checks or replaces itself - see the SAFETY note above), but it still
-' keeps one for the record and for anyone reading the source.
-Private Const SCRIPT_CHANGELOG As String = "Added changelog display - stale modules now show a one-line summary of what changed, from manifest.txt and from each downloaded module's own SCRIPT_CHANGELOG."
+' One-line summary of what changed in THIS version, shown when the updater
+' finds itself stale. One physical line, no "|".
+Private Const SCRIPT_CHANGELOG As String = "The updater can now update itself - replaced last, after the workbook is saved, via a temporary bootstrap module run from Application.OnTime."
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -93,6 +104,15 @@ Private Const UPDATE_BASE_URL As String = _
 ' Seconds to wait on each HTTP request.
 Private Const REQUEST_TIMEOUT_SECONDS As Long = 20
 
+' The throwaway module that performs a self-update - see HOW THIS MODULE
+' UPDATES ITSELF above. Removed again by FinishMidasSelfUpdate, or by the
+' next check if a crash left it behind.
+Private Const BOOTSTRAP_MODULE As String = "MidasUpdaterBootstrap"
+
+' vbext_ComponentType.vbext_ct_StdModule, spelled out so no reference to
+' the VBIDE library is needed.
+Private Const STD_MODULE As Long = 1
+
 
 
 ' ===========================================================================
@@ -108,9 +128,11 @@ Public Sub CheckMidasMacroUpdates()
     Dim okLog As String, staleLog As String, skipLog As String
     Dim okCount As Long, staleCount As Long
     Dim staleNames As String
+    Dim selfStale As Boolean, selfCompName As String, selfLog As String
     Dim trustMsg As String
     Dim answer As VbMsgBoxResult
     Dim report As String
+    Dim prompt As String
 
     If Not FetchText(UPDATE_BASE_URL & "/manifest.txt", manifest) Then
         MsgBox "Could not reach the update server." & vbCrLf & vbCrLf & _
@@ -127,10 +149,28 @@ Public Sub CheckMidasMacroUpdates()
     ' the same 1004 before the trust message ever gets shown, so skip the
     ' loop entirely when the project is not reachable.
     If Len(trustMsg) = 0 Then
+        ' A bootstrap left behind by an interrupted self-update.
+        Call RemoveBootstrapModule
+
         For Each comp In ThisWorkbook.VBProject.VBComponents
             code = ComponentCode(comp)
             thisId = ConstValue(code, "SCRIPT_ID")
-            If Len(thisId) > 0 And StrComp(thisId, SCRIPT_ID, vbTextCompare) <> 0 Then
+            If StrComp(thisId, SCRIPT_ID, vbTextCompare) = 0 Then
+                ' This module. Never handed to InstallUpdates - it is
+                ' replaced last, by BeginSelfUpdate. Uses the constant, not
+                ' the parsed code, since this is the code actually running.
+                latest = ManifestVersion(manifest, thisId)
+                If Len(latest) > 0 And StrComp(SCRIPT_VERSION, latest, vbTextCompare) <> 0 Then
+                    selfStale = True
+                    selfCompName = comp.Name
+                    selfLog = "  - " & comp.Name & "  " & SCRIPT_VERSION & _
+                              "  ->  " & latest & vbCrLf
+                    latestChangelog = ManifestChangelog(manifest, thisId)
+                    If Len(latestChangelog) > 0 Then
+                        selfLog = selfLog & "      " & latestChangelog & vbCrLf
+                    End If
+                End If
+            ElseIf Len(thisId) > 0 Then
                 thisVer = ConstValue(code, "SCRIPT_VERSION")
                 latest = ManifestVersion(manifest, thisId)
                 If Len(latest) = 0 Then
@@ -158,6 +198,7 @@ Public Sub CheckMidasMacroUpdates()
 
     If okCount > 0 Then report = report & "UP TO DATE (" & okCount & "):" & vbCrLf & okLog
     If staleCount > 0 Then report = report & vbCrLf & "OUT OF DATE (" & staleCount & "):" & vbCrLf & staleLog
+    If selfStale Then report = report & vbCrLf & "UPDATER ITSELF (replaced last):" & vbCrLf & selfLog
     If Len(skipLog) > 0 Then report = report & vbCrLf & "NOT MANAGED:" & vbCrLf & skipLog
 
     If Len(trustMsg) > 0 Then
@@ -165,7 +206,7 @@ Public Sub CheckMidasMacroUpdates()
         Exit Sub
     End If
 
-    If staleCount = 0 Then
+    If staleCount = 0 And Not selfStale Then
         If okCount = 0 Then
             MsgBox report & vbCrLf & "No MIDAS modules found in this workbook.", vbInformation
         Else
@@ -174,16 +215,23 @@ Public Sub CheckMidasMacroUpdates()
         Exit Sub
     End If
 
-    answer = MsgBox(report & vbCrLf & _
-             "Replace the " & staleCount & " out-of-date module(s)?" & vbCrLf & vbCrLf & _
+    prompt = report & vbCrLf & "Replace the " & _
+             (staleCount + IIf(selfStale, 1, 0)) & " out-of-date module(s)?" & vbCrLf & vbCrLf & _
              "No local backup is taken - any per-workbook edit to a managed " & _
-             "module is lost." & vbCrLf & vbCrLf & _
-             "Save your work before continuing.", _
-             vbYesNo + vbQuestion, "MIDAS macro updater")
+             "module is lost." & vbCrLf & vbCrLf
+    If selfStale Then
+        prompt = prompt & "The updater itself goes LAST: the workbook is SAVED " & _
+                 "automatically first, then it rewrites itself once this " & _
+                 "macro has finished." & vbCrLf & vbCrLf
+    End If
+    prompt = prompt & "Save your work before continuing."
+
+    answer = MsgBox(prompt, vbYesNo + vbQuestion, "MIDAS macro updater")
 
     If answer <> vbYes Then Exit Sub
 
-    Call InstallUpdates(staleNames)
+    If staleCount > 0 Then Call InstallUpdates(staleNames)
+    If selfStale Then Call BeginSelfUpdate(selfCompName)
 
 End Sub
 
@@ -271,6 +319,178 @@ Private Function ReplaceComponentCode(ByVal comp As Object, ByVal newCode As Str
     Err.Clear
     On Error GoTo 0
 
+End Function
+
+
+' ===========================================================================
+'  SELF-UPDATE - see HOW THIS MODULE UPDATES ITSELF in the header
+' ===========================================================================
+
+' Steps 2-3: download, save, plant the bootstrap, schedule it, return.
+' Nothing in this module is rewritten here - that happens only once this
+' procedure and CheckMidasMacroUpdates have both finished.
+Private Sub BeginSelfUpdate(ByVal compName As String)
+
+    Dim newCode As String
+    Dim tempPath As String
+    Dim finishCall As String
+    Dim fileNo As Integer
+    Dim boot As Object
+    Dim stage As String
+
+    If Len(ThisWorkbook.Path) = 0 Then
+        MsgBox "The updater did not update itself: this workbook has never been " & _
+               "saved, and it must be saved before the updater rewrites itself." & _
+               vbCrLf & "Save it and run the check again.", vbExclamation
+        Exit Sub
+    End If
+
+    If Not FetchText(UPDATE_BASE_URL & "/" & SCRIPT_ID & ".bas", newCode) Then
+        MsgBox "The updater could not download its own new version:" & vbCrLf & _
+               newCode, vbExclamation
+        Exit Sub
+    End If
+
+    ' Stricter than InstallUpdates: it must be THIS module, not merely some
+    ' managed one, or another module's code would overwrite the updater.
+    If StrComp(ConstValue(newCode, "SCRIPT_ID"), SCRIPT_ID, vbTextCompare) <> 0 Then
+        MsgBox "The downloaded updater is not the updater (SCRIPT_ID is """ & _
+               ConstValue(newCode, "SCRIPT_ID") & """) - refusing to install it.", _
+               vbExclamation
+        Exit Sub
+    End If
+
+    ' The feed serves LF line endings; AddFromFile wants CRLF lines.
+    newCode = Replace(newCode, vbCrLf, vbLf)
+    newCode = Replace(newCode, vbCr, vbLf)
+    newCode = Replace(newCode, vbLf, vbCrLf)
+
+    ' Chain to FinishMidasSelfUpdate only if the new code still has it -
+    ' Application.OnTime on a missing macro is a runtime error.
+    If InStr(1, newCode, "Sub FinishMidasSelfUpdate", vbTextCompare) > 0 Then
+        finishCall = QualifiedMacro("FinishMidasSelfUpdate")
+    End If
+
+    tempPath = Environ$("TEMP") & Application.PathSeparator & _
+               "midas-macro-updater-" & Format$(Now, "yyyymmdd_hhnnss") & ".bas"
+
+    On Error GoTo Failed
+
+    stage = "write the new code to " & tempPath
+    fileNo = FreeFile
+    Open tempPath For Output As #fileNo
+    Print #fileNo, newCode;
+    Close #fileNo
+
+    ' BEFORE anything risky. Every module InstallUpdates just replaced is on
+    ' disk after this, so a crash further down costs only this step.
+    stage = "save the workbook"
+    ThisWorkbook.Save
+
+    stage = "add the " & BOOTSTRAP_MODULE & " module"
+    Call RemoveBootstrapModule
+    Set boot = ThisWorkbook.VBProject.VBComponents.Add(STD_MODULE)
+    boot.Name = BOOTSTRAP_MODULE
+    With boot.CodeModule
+        ' The VBE may already have inserted "Option Explicit".
+        If .CountOfLines > 0 Then .DeleteLines 1, .CountOfLines
+        .AddFromString BootstrapCode(compName, tempPath, finishCall)
+    End With
+
+    stage = "schedule the bootstrap"
+    Application.OnTime Now, QualifiedMacro("MidasUpdaterBootstrapRun")
+    Exit Sub
+
+Failed:
+    MsgBox "The updater did not update itself - it could not " & stage & ":" & _
+           vbCrLf & Err.Description & vbCrLf & vbCrLf & _
+           "The other updates are unaffected. Nothing in the updater was changed.", _
+           vbExclamation
+    On Error Resume Next
+    Close #fileNo
+    Call RemoveBootstrapModule
+
+End Sub
+
+' The bootstrap module's source. It is the ONLY code running when the
+' updater is rewritten: it replaces the updater from tempPath, deletes the
+' file, then hands over to finishCall (the NEW updater's
+' FinishMidasSelfUpdate) - or, if the new code has none, just says so.
+Private Function BootstrapCode(ByVal compName As String, ByVal tempPath As String, _
+                               ByVal finishCall As String) As String
+
+    Dim b As String
+
+    b = "Option Explicit" & vbCrLf & vbCrLf
+    b = b & "' Temporary - written by the MIDAS macro updater to replace itself." & vbCrLf
+    b = b & "' Safe to delete if it is ever left behind." & vbCrLf & vbCrLf
+    b = b & "Public Sub MidasUpdaterBootstrapRun()" & vbCrLf
+    b = b & "    Dim comp As Object" & vbCrLf
+    b = b & "    On Error GoTo Failed" & vbCrLf
+    b = b & "    Set comp = ThisWorkbook.VBProject.VBComponents(" & VbaLiteral(compName) & ")" & vbCrLf
+    b = b & "    With comp.CodeModule" & vbCrLf
+    b = b & "        If .CountOfLines > 0 Then .DeleteLines 1, .CountOfLines" & vbCrLf
+    b = b & "        .AddFromFile " & VbaLiteral(tempPath) & vbCrLf
+    b = b & "    End With" & vbCrLf
+    b = b & "    On Error Resume Next" & vbCrLf
+    b = b & "    Kill " & VbaLiteral(tempPath) & vbCrLf
+    If Len(finishCall) > 0 Then
+        b = b & "    Application.OnTime Now, " & VbaLiteral(finishCall) & vbCrLf
+    Else
+        b = b & "    MsgBox " & VbaLiteral("The MIDAS macro updater replaced itself. Delete " & _
+                "the " & BOOTSTRAP_MODULE & " module and save the workbook.") & _
+                ", vbInformation" & vbCrLf
+    End If
+    b = b & "    Exit Sub" & vbCrLf
+    b = b & "Failed:" & vbCrLf
+    b = b & "    MsgBox " & VbaLiteral("The MIDAS macro updater could not replace itself: ") & _
+            " & Err.Description & vbCrLf & vbCrLf & " & _
+            VbaLiteral("The workbook was saved just before this step. Close it " & _
+                       "WITHOUT saving and reopen it to get the previous updater " & _
+                       "back, then paste midas-macro-updater.bas in by hand.") & _
+            ", vbExclamation" & vbCrLf
+    b = b & "End Sub" & vbCrLf
+
+    BootstrapCode = b
+
+End Function
+
+' Step 5. Runs as the NEW code, scheduled by the bootstrap, so the
+' bootstrap is no longer running and can be removed. Public because
+' Application.OnTime can only reach public procedures.
+Public Sub FinishMidasSelfUpdate()
+
+    Call RemoveBootstrapModule
+
+    MsgBox "MIDAS macro updater updated itself to " & SCRIPT_VERSION & "." & _
+           vbCrLf & vbCrLf & SCRIPT_CHANGELOG & vbCrLf & vbCrLf & _
+           "Save the workbook to keep it.", vbInformation, "MIDAS macro updater"
+
+End Sub
+
+' Deletes the bootstrap module if one exists. Safe whenever the bootstrap
+' itself is not the code running.
+Private Sub RemoveBootstrapModule()
+
+    Dim comp As Object
+
+    On Error Resume Next
+    Set comp = ThisWorkbook.VBProject.VBComponents(BOOTSTRAP_MODULE)
+    If Not comp Is Nothing Then ThisWorkbook.VBProject.VBComponents.Remove comp
+    Err.Clear
+    On Error GoTo 0
+
+End Sub
+
+' A macro name Application.OnTime resolves in THIS workbook even when
+' another workbook is active.
+Private Function QualifiedMacro(ByVal procName As String) As String
+    QualifiedMacro = "'" & Replace(ThisWorkbook.Name, "'", "''") & "'!" & procName
+End Function
+
+' s as a VBA string literal, quotes doubled.
+Private Function VbaLiteral(ByVal s As String) As String
+    VbaLiteral = """" & Replace(s, """", """""") & """"
 End Function
 
 
