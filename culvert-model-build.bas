@@ -28,7 +28,7 @@ Option Explicit
 ' so a screenshot of a run does not otherwise say which build produced it -
 ' bump this whenever the file changes and check it matches before
 ' diagnosing anything from a report.
-Private Const SCRIPT_VERSION As String = "2026-09-23d"
+Private Const SCRIPT_VERSION As String = "2026-09-23e"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -1448,7 +1448,8 @@ End Sub
 '    SLS-1..14   serviceability, factors 1.0 / 0.5
 '    ULS-1..14   ultimate, 1.35 permanent / 1.5 / 1.45 / 0.75
 '    ACC-1       accidental (LLacc) - NOT seismic, always built
-'    EQ-1        seismic (EQ + ATA) - only when SEISMIC_ACTIVE
+'    EQ-1        seismic (EQ lateral pressure only, no ATA inertia) -
+'                only when SEISMIC_ACTIVE
 '    ENV_SER     envelope of all SLS
 '    ENV_STR     envelope of all ULS
 '    ENV_ALL     envelope of ENV_SER + ENV_STR, plus EQ-1 when
@@ -1507,11 +1508,17 @@ Private Sub GenerateLoadCombinations()
 
     ' --- Accidental and seismic ---
     ' ACC-1 is an accidental (impact) case, not a seismic one, so it is
-    ' built regardless. EQ-1 names the EQ and ATA cases, so it goes only
-    ' when they do.
+    ' built regardless. EQ-1 goes only when the seismic gate is on.
+    '
+    ' EQ-1 deliberately does NOT reference ATA (by request, 2026-09-23) -
+    ' only the EQ lateral earth pressure case. ATA is still built as a
+    ' static load case (db/STLD) and still carries its self-weight
+    ' inertia record (db/BODF) whenever SEISMIC_ACTIVE, per the
+    ' SEISMIC GATE block above - it is simply not pulled into any
+    ' combination any more, EQ-1 or otherwise.
     Call AddCombo("ACC-1", 0, "ST", "DL:1,EV2:1,EHA2_L:1,EHA2_R:1,LLacc:1", 1)
     If SEISMIC_ACTIVE Then
-        Call AddCombo("EQ-1", 0, "ST", "DL:1,EV2:1,EHA2_L:1,EHA2_R:1,EQ:1,ATA:1", 1)
+        Call AddCombo("EQ-1", 0, "ST", "DL:1,EV2:1,EHA2_L:1,EHA2_R:1,EQ:1", 1)
     End If
 
     ' --- Envelopes ---
