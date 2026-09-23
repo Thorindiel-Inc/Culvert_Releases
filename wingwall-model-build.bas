@@ -30,7 +30,7 @@ Option Explicit
 ' and the code actually running can silently diverge, and a fix that
 ' looks ineffective is very often just not re-imported yet. Check this
 ' matches before diagnosing anything from a report screenshot.
-Private Const SCRIPT_VERSION As String = "2026-09-23c"
+Private Const SCRIPT_VERSION As String = "2026-09-23e"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -245,7 +245,7 @@ Private GEO_RIGHT_L As Double, GEO_RIGHT_HNEAR As Double, GEO_RIGHT_HFAR As Doub
 Private Const PROGRESS_BAR_WIDTH As Long = 20
 Private Const PROGRESS_STEPS_BUILD As Long = 21
 Private Const PROGRESS_STEPS_CLEAN As Long = 12
-Private Const PROGRESS_STEPS_VERIFY As Long = 2
+Private Const PROGRESS_STEPS_VERIFY As Long = 12
 Private PROGRESS_STEP As Long
 Private PROGRESS_TOTAL As Long
 
@@ -568,10 +568,37 @@ Sub BuildWingwallModel()
     If CLEAN_BEFORE_BUILD Then
         cleanReport = ""
         Call RunCleanSteps(cleanReport)
+        ' Every endpoint RunCleanSteps deletes gets read back, not just the
+        ' two with model-wide-unique names - see VerifyEmpty's own comment
+        ' for why a NAME-only check missed half of these. db/PNLD and
+        ' db/PNLA get it for the same reason culvert's LCOM-GEN/STLD do:
+        ' PNLD's keys can renumber when the endpoint isn't actually empty,
+        ' and PNLA binds every area load to its type by bare integer
+        ' PNLD_KEY with nothing else to catch a silent mismatch.
         Call StepResult(cleanReport, Progress("verify Load Combinations cleared"), _
                         VerifyEmpty("db/LCOM-GEN", "Load combinations"))
+        Call StepResult(cleanReport, Progress("verify Plane Loads cleared"), _
+                        VerifyEmpty("db/PNLA", "Plane loads"))
+        Call StepResult(cleanReport, Progress("verify Plane Load Types cleared"), _
+                        VerifyEmpty("db/PNLD", "Plane load types"))
+        Call StepResult(cleanReport, Progress("verify Pressure Loads cleared"), _
+                        VerifyEmpty("db/PRES", "Pressure loads"))
+        Call StepResult(cleanReport, Progress("verify Self-Weight cleared"), _
+                        VerifyEmpty("db/BODF", "Self-weight"))
         Call StepResult(cleanReport, Progress("verify Static Load Cases cleared"), _
                         VerifyEmpty("db/STLD", "Static load cases"))
+        Call StepResult(cleanReport, Progress("verify Point Springs cleared"), _
+                        VerifyEmpty("db/NSPR", "Point springs"))
+        Call StepResult(cleanReport, Progress("verify Elements cleared"), _
+                        VerifyEmpty("db/ELEM", "Elements"))
+        Call StepResult(cleanReport, Progress("verify Nodes cleared"), _
+                        VerifyEmpty("db/NODE", "Nodes"))
+        Call StepResult(cleanReport, Progress("verify Thickness cleared"), _
+                        VerifyEmpty("db/THIK", "Thickness"))
+        Call StepResult(cleanReport, Progress("verify Material cleared"), _
+                        VerifyEmpty("db/MATL", "Material"))
+        Call StepResult(cleanReport, Progress("verify Named UCS cleared"), _
+                        VerifyEmpty("db/NUCS", "Named UCS"))
 
         ' Keep the report inside VBA's ~1024-char MsgBox limit: one line when
         ' the clean pass was clean, the full text only when it was not.
@@ -764,17 +791,33 @@ Private Function DeleteAndCheck(ByVal path As String) As String
 End Function
 
 ' GETs an endpoint after a delete and reports whether anything survived.
-' Crude on purpose: a record of either of these types carries a "NAME", so
-' its presence in the response means the endpoint is not empty. Returns ""
-' (treated as OK) when it looks clear.
+'
+' Checks against the CONFIRMED-LIVE empty signal (an empty endpoint
+' answers a bare {"message": ""} to every db/* read - see CLAUDE.md,
+' 2026-09-22) rather than searching for a "NAME" field. That NAME-search
+' version only worked for endpoints whose records happen to carry a NAME
+' - db/LCOM-GEN, db/STLD, db/PNLD, db/MATL, db/THIK, db/NUCS - and stayed
+' silently "clean" on every endpoint without one (db/PNLA, db/PRES,
+' db/BODF, db/NSPR, db/ELEM, db/NODE: half of what RunCleanSteps
+' deletes), which is exactly the gap that let a stale db/PNLD collision
+' through undetected before this check covered every cleaned endpoint.
+'
+' Returns "" (treated as OK) when the endpoint reads back empty.
 Private Function VerifyEmpty(ByVal path As String, ByVal what As String) As String
 
     Dim resp As String
     Dim statusCode As Long
+    Dim t As String
 
     Call SendApiRequest("GET", path, "", resp, statusCode)
 
-    If InStr(1, resp, """NAME""", vbTextCompare) > 0 Then
+    t = resp
+    t = Replace(t, " ", "")
+    t = Replace(t, vbCr, "")
+    t = Replace(t, vbLf, "")
+    t = Replace(t, vbTab, "")
+
+    If InStr(1, t, """message"":""""", vbTextCompare) = 0 Then
         VerifyEmpty = "WARN: " & what & " STILL HOLD RECORDS after the delete - the " & _
             "keyless DELETE did not clear this endpoint. Clear it by hand in Civil NX " & _
             "and re-run; otherwise the writes below will collide on duplicate names."
@@ -1719,6 +1762,21 @@ Private Function PostPlaneLoadTypes() As String
     '   - duplicate NAMEs are accepted silently.
     ' This function only ever writes 1..6, so the normal path is safe.
     '
+    ' THE ACTUAL PUT. This call went missing at some point - the function
+    ' built the body and jumped straight to the read-back below without
+    ' ever sending it, so VerifyPlaneLoadTypeKeys was reading an endpoint
+    ' that RunCleanSteps had correctly emptied and nothing had written to
+    ' since. That is exactly what "key 1 holds "" but should hold
+    ' durgun-R" looks like when every key is missing, not just shifted -
+    ' confirmed live 2026-09-23 after two runs reproduced the identical
+    ' error even with every cleaned endpoint verified empty beforehand.
+    Dim writeResult As String
+    writeResult = PostAndCheck("db/PNLD", b, "PUT")
+    If Len(writeResult) > 0 Then
+        PostPlaneLoadTypes = writeResult
+        Exit Function
+    End If
+
     ' The read-back below is belt-and-braces, not a bug fix. db/PNLA binds
     ' each load to its type by integer PNLD_KEY - its 16 fields carry no
     ' name-based reference - so if the keys ever did shift, every area load

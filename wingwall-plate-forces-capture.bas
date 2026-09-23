@@ -28,7 +28,7 @@ Option Explicit
 ' hand, so the file in the repo and the code actually running can silently
 ' diverge - check this stamp matches the constant here before concluding
 ' anything from a run. Bump it whenever this file changes.
-Private Const SCRIPT_VERSION As String = "2026-09-23e"
+Private Const SCRIPT_VERSION As String = "2026-09-23g"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -158,6 +158,21 @@ Private Const LOCAL_UCS_TYPE_OTHER As String = "Local"
 ' The name midas-wingwall-model-build.bas gives the UCS at db/NUCS. Fall
 ' back to "CurrentUCS" if the API turns out to ignore a real name.
 Private Const UCS_NAME_FOR_RESULTS As String = "FOUND"
+
+' Argument.DISPLAY.VIEW.UCS_AXIS (per the "Display" JSON Manual, ed.
+' 2024.10.25 - the same schema Argument.DISPLAY follows inside
+' view/CAPTURE), intended to draw the UCS axis triad on the capture
+' itself as a visual sanity check.
+'
+' CONFIRMED LIVE 2026-09-23: this field is a NO-OP, and so is the
+' equivalent toggle in Civil NX's own GUI - the UCS itself is genuinely
+' applied (component values differ under "FOUND" vs "CurrentUCS"/"Local",
+' see CLAUDE.md's "view/CAPTURE DOES honour a named UCS"), but nothing
+' visibly marks it on screen or in a capture, in the API or by hand.
+' MIDAS's own limitation, not a request-shape problem - left wired in
+' (harmless) rather than ripped out, in case a future Civil NX version
+' fixes it. "tml" rows only: "dvr" rows use Local.
+Private Const SHOW_UCS_AXIS As Boolean = True
 
 ' How adjacent-element values are combined (OPTIONS.AVERAGE_NODAL.TYPE).
 '   "Element"  : raw per-element values, no smoothing (default here).
@@ -806,6 +821,12 @@ Private Function BuildCaptureBody(ByVal exportPath As String, _
     ' Perspective projection - "dvr" (wall) rows only.
     If PERSPECTIVE_FOR_DVR And InStr(1, job.shapeName, "dvr", vbTextCompare) > 0 Then
         b = b & """PERSPECTIVE"": true,"
+    End If
+
+    ' Draws the UCS axis triad on the picture itself, "tml" rows only - see
+    ' SHOW_UCS_AXIS's own comment.
+    If SHOW_UCS_AXIS And InStr(1, job.shapeName, "tml", vbTextCompare) > 0 Then
+        b = b & """DISPLAY"": {""VIEW"": {""UCS_AXIS"": true}},"
     End If
 
     ' ---- result display ----
