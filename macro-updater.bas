@@ -34,11 +34,16 @@ Option Explicit
 '
 '  SAFETY
 '   * nothing is replaced without an explicit Yes
-'   * each module is exported to a backup folder beside the workbook first
 '   * this module never replaces itself (a module cannot rewrite its own
 '     code while that code is running)
 '   * a download with no SCRIPT_ID is refused, so a 404 body or a proxy
 '     login page can never be written into the VBA project
+'
+'  NO LOCAL BACKUP IS TAKEN BEFORE REPLACING. The published .bas files are
+'  themselves the record of what a module looked like at any point - this
+'  repo's git history is the backup, not a per-workbook copy. If a
+'  workbook-specific edit needs recovering, it has to come from wherever
+'  that edit was made, not from this updater.
 '
 '  THE MAPI KEY IS NOT IN THESE MODULES AT ALL
 '  Since 2026-09-23 every module reads it from INPUT!J20 at runtime, so an
@@ -48,9 +53,9 @@ Option Explicit
 '
 '  WHAT AN UPDATE DOES NOT PRESERVE
 '  Any local edit to a managed module - a tweaked JOB_LIST, a changed
-'  sheet name, an adjusted zoom - is replaced by the published version.
-'  The backup in BACKUP_SUBFOLDER is what you diff against to get it back.
-'  Keep per-workbook customisation on the worksheet, not in the module.
+'  sheet name, an adjusted zoom - is replaced by the published version,
+'  with NO local backup taken first (see above). Keep per-workbook
+'  customisation on the worksheet, not in the module.
 ' ============================================================================
 
 
@@ -58,7 +63,7 @@ Option Explicit
 '  CONFIG
 ' ---------------------------------------------------------------------------
 
-Private Const SCRIPT_VERSION As String = "2026-09-23b"
+Private Const SCRIPT_VERSION As String = "2026-09-23c"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -73,9 +78,6 @@ Private Const SCRIPT_ID As String = "macro-updater"
 ' Any plain HTTP(S) host would work just as well.
 Private Const UPDATE_BASE_URL As String = _
     "https://raw.githubusercontent.com/Thorindiel-Inc/Culvert_Releases/main"
-
-' Subfolder beside the workbook where the pre-update copies go.
-Private Const BACKUP_SUBFOLDER As String = "macro-backups"
 
 ' Seconds to wait on each HTTP request.
 Private Const REQUEST_TIMEOUT_SECONDS As Long = 20
@@ -159,8 +161,8 @@ Public Sub CheckMidasMacroUpdates()
 
     answer = MsgBox(report & vbCrLf & _
              "Replace the " & staleCount & " out-of-date module(s)?" & vbCrLf & vbCrLf & _
-             "A copy of each is exported to '" & BACKUP_SUBFOLDER & _
-             "' beside this workbook first." & vbCrLf & vbCrLf & _
+             "No local backup is taken - any per-workbook edit to a managed " & _
+             "module is lost." & vbCrLf & vbCrLf & _
              "Save your work before continuing.", _
              vbYesNo + vbQuestion, "MIDAS macro updater")
 
@@ -175,9 +177,10 @@ End Sub
 '  INSTALL
 ' ===========================================================================
 
-' staleList is "moduleName|scriptId;" repeated. Each module is exported as a
-' backup, then its code is replaced IN PLACE - the component is never removed
-' and re-imported, so the module keeps its name and any references to it.
+' staleList is "moduleName|scriptId;" repeated. Each module's code is
+' replaced IN PLACE, with no backup taken first (see the header comment's
+' NO LOCAL BACKUP note) - the component is never removed and re-imported,
+' so the module keeps its name and any references to it.
 Private Sub InstallUpdates(ByVal staleList As String)
 
     Dim rows() As String
@@ -185,16 +188,8 @@ Private Sub InstallUpdates(ByVal staleList As String)
     Dim i As Long
     Dim comp As Object
     Dim newCode As String
-    Dim backupDir As String
     Dim doneLog As String, failLog As String
     Dim doneCount As Long, failCount As Long
-
-    backupDir = ThisWorkbook.Path & Application.PathSeparator & BACKUP_SUBFOLDER
-    If Not EnsureFolderExists(backupDir) Then
-        MsgBox "Could not create the backup folder:" & vbCrLf & backupDir & vbCrLf & _
-               vbCrLf & "Nothing was changed.", vbCritical
-        Exit Sub
-    End If
 
     rows = Split(staleList, ";")
 
@@ -221,17 +216,13 @@ Private Sub InstallUpdates(ByVal staleList As String)
                 If comp Is Nothing Then
                     failCount = failCount + 1
                     failLog = failLog & "  - " & f(0) & ": module vanished" & vbCrLf
-                ElseIf Not BackupComponent(comp, backupDir) Then
-                    failCount = failCount + 1
-                    failLog = failLog & "  - " & f(0) & ": backup failed, left alone" & vbCrLf
                 ElseIf ReplaceComponentCode(comp, newCode) Then
                     doneCount = doneCount + 1
                     doneLog = doneLog & "  - " & f(0) & "  ->  " & _
                               ConstValue(newCode, "SCRIPT_VERSION") & vbCrLf
                 Else
                     failCount = failCount + 1
-                    failLog = failLog & "  - " & f(0) & ": replace failed - restore " & _
-                              "from " & BACKUP_SUBFOLDER & vbCrLf
+                    failLog = failLog & "  - " & f(0) & ": replace failed" & vbCrLf
                 End If
             End If
         End If
@@ -240,27 +231,10 @@ Private Sub InstallUpdates(ByVal staleList As String)
     MsgBox "MIDAS macro update" & vbCrLf & String(46, "-") & vbCrLf & _
            IIf(doneCount > 0, "UPDATED (" & doneCount & "):" & vbCrLf & doneLog, "") & _
            IIf(failCount > 0, vbCrLf & "FAILED (" & failCount & "):" & vbCrLf & failLog, "") & _
-           vbCrLf & "Backups: " & backupDir & vbCrLf & vbCrLf & _
-           "Save the workbook to keep the updated code.", _
+           vbCrLf & "Save the workbook to keep the updated code.", _
            IIf(failCount > 0, vbExclamation, vbInformation)
 
 End Sub
-
-
-Private Function BackupComponent(ByVal comp As Object, ByVal folder As String) As Boolean
-
-    Dim path As String
-
-    path = folder & Application.PathSeparator & comp.Name & "_" & _
-           Format$(Now, "yyyymmdd_hhnnss") & ".bas"
-
-    On Error Resume Next
-    comp.Export path
-    BackupComponent = (Err.Number = 0)
-    Err.Clear
-    On Error GoTo 0
-
-End Function
 
 
 Private Function ReplaceComponentCode(ByVal comp As Object, ByVal newCode As String) As Boolean
@@ -396,43 +370,6 @@ Private Function FetchText(ByVal url As String, ByRef outText As String) As Bool
     End If
 
     FetchText = True
-
-End Function
-
-
-Private Function EnsureFolderExists(ByVal folderPath As String) As Boolean
-
-    Dim parts() As String
-    Dim i As Integer
-    Dim built As String
-
-    EnsureFolderExists = False
-
-    folderPath = Replace(folderPath, "/", "\")
-
-    Do While Right(folderPath, 1) = "\"
-        folderPath = Left(folderPath, Len(folderPath) - 1)
-    Loop
-
-    If Len(folderPath) = 0 Then Exit Function
-
-    parts = Split(folderPath, "\")
-    built = parts(LBound(parts))          ' drive letter, e.g. "C:"
-
-    On Error GoTo Failed
-
-    For i = LBound(parts) + 1 To UBound(parts)
-        built = built & "\" & parts(i)
-        If Dir(built, vbDirectory) = "" Then
-            MkDir built
-        End If
-    Next i
-
-    EnsureFolderExists = (Dir(folderPath, vbDirectory) <> "")
-    Exit Function
-
-Failed:
-    EnsureFolderExists = False
 
 End Function
 
