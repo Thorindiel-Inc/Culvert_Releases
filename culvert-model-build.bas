@@ -28,7 +28,7 @@ Option Explicit
 ' so a screenshot of a run does not otherwise say which build produced it -
 ' bump this whenever the file changes and check it matches before
 ' diagnosing anything from a report.
-Private Const SCRIPT_VERSION As String = "2026-09-23c"
+Private Const SCRIPT_VERSION As String = "2026-09-23d"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -2457,7 +2457,9 @@ End Function
 '  Retrieves beam force result tables from MIDAS Civil NX after analysis
 '  and populates both tables on the "MIDAS_RESULTS" sheet:
 '    Table 1 (Cols B:J, starting row 3):
-'      All 28 SLS & ULS combinations (plus ACC-1 and EQ-1 if active)
+'      All 28 SLS & ULS combinations (plus EQ-1 if active; ACC-1 is
+'      excluded from this pull by request even though it is still built
+'      as a combination - see GenerateLoadCombinations)
 '    Table 2 (Cols S:AA, starting row 36):
 '      The 4 governing envelopes: ENV_SER(max), ENV_ALL(max),
 '                                 ENV_SER(min), ENV_ALL(min)
@@ -2511,7 +2513,6 @@ Private Function PostBeamForceResults() As String
     For i = 1 To 14
         t1Combos = t1Combos & "," & """ULS-" & i & "(CB)"""
     Next i
-    t1Combos = t1Combos & ",""ACC-1(CB)"""
     If SEISMIC_ACTIVE Then
         t1Combos = t1Combos & ",""EQ-1(CB)"""
     End If

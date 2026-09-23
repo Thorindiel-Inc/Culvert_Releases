@@ -26,7 +26,7 @@ Option Explicit
 ' hand, so the file in the repo and the code actually running can silently
 ' diverge - check this stamp matches the constant here before concluding
 ' anything from a run. Bump it whenever this file changes.
-Private Const SCRIPT_VERSION As String = "2026-09-23c"
+Private Const SCRIPT_VERSION As String = "2026-09-23d"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -638,11 +638,27 @@ Private Function BuildLoadCaptureBody(ByVal exportPath As String, _
     b = b & """NODE"": true"
     b = b & "}"
 
-    If SHOW_POINT_SPRING_SUPPORT Or SHOW_SUPPORT Then
+    ' BOUNDARY is sent EXPLICITLY on every job, not just gated on the
+    ' SHOW_* constants - on (per those constants) for the bare-model row,
+    ' explicitly false for every load-case row. Confirmed live 2026-09-23:
+    ' Civil NX CAN render boundary symbols and a load overlay together, so
+    ' omitting the field on load-case rows is not enough to guarantee it
+    ' stays off (whatever the last capture left active could otherwise
+    ' carry over) - only the bare-model row is meant to show springs, per
+    ' request.
+    If Len(job.CaseType) = 0 Then
+        If SHOW_POINT_SPRING_SUPPORT Or SHOW_SUPPORT Then
+            b = b & ","
+            b = b & """BOUNDARY"": {"
+            b = b & """POINT_SPRING_SUPPORT"": " & LCase(SHOW_POINT_SPRING_SUPPORT) & ","
+            b = b & """SUPPORT"": " & LCase(SHOW_SUPPORT)
+            b = b & "}"
+        End If
+    Else
         b = b & ","
         b = b & """BOUNDARY"": {"
-        b = b & """POINT_SPRING_SUPPORT"": " & LCase(SHOW_POINT_SPRING_SUPPORT) & ","
-        b = b & """SUPPORT"": " & LCase(SHOW_SUPPORT)
+        b = b & """POINT_SPRING_SUPPORT"": false,"
+        b = b & """SUPPORT"": false"
         b = b & "}"
     End If
 
