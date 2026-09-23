@@ -41,7 +41,7 @@ Option Explicit
 '     login page can never be written into the VBA project
 '
 '  THE MAPI KEY IS NOT IN THESE MODULES AT ALL
-'  Since 2026-09-23 every module reads it from INPUT!K20 at runtime, so an
+'  Since 2026-09-23 every module reads it from INPUT!J20 at runtime, so an
 '  update cannot cost the user their key and the published copies carry no
 '  secret whatsoever. Rotating a key is a one-cell edit, not a re-paste of
 '  nine modules.
@@ -58,7 +58,7 @@ Option Explicit
 '  CONFIG
 ' ---------------------------------------------------------------------------
 
-Private Const SCRIPT_VERSION As String = "2026-09-23a"
+Private Const SCRIPT_VERSION As String = "2026-09-23b"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -108,26 +108,33 @@ Public Sub CheckMidasMacroUpdates()
 
     trustMsg = VbaTrustProblem()
 
-    For Each comp In ThisWorkbook.VBProject.VBComponents
-        code = ComponentCode(comp)
-        thisId = ConstValue(code, "SCRIPT_ID")
-        If Len(thisId) > 0 And StrComp(thisId, SCRIPT_ID, vbTextCompare) <> 0 Then
-            thisVer = ConstValue(code, "SCRIPT_VERSION")
-            latest = ManifestVersion(manifest, thisId)
-            If Len(latest) = 0 Then
-                skipLog = skipLog & "  - " & comp.Name & " (" & thisId & _
-                          "): not on the server" & vbCrLf
-            ElseIf StrComp(thisVer, latest, vbTextCompare) = 0 Then
-                okCount = okCount + 1
-                okLog = okLog & "  - " & comp.Name & "  " & thisVer & vbCrLf
-            Else
-                staleCount = staleCount + 1
-                staleLog = staleLog & "  - " & comp.Name & "  " & thisVer & _
-                           "  ->  " & latest & vbCrLf
-                staleNames = staleNames & comp.Name & "|" & thisId & ";"
+    ' Enumerating VBComponents is what actually trips the Trust Center
+    ' setting - VbaTrustProblem() already proved that above via its own
+    ' On Error Resume Next. Doing it again here unguarded would crash with
+    ' the same 1004 before the trust message ever gets shown, so skip the
+    ' loop entirely when the project is not reachable.
+    If Len(trustMsg) = 0 Then
+        For Each comp In ThisWorkbook.VBProject.VBComponents
+            code = ComponentCode(comp)
+            thisId = ConstValue(code, "SCRIPT_ID")
+            If Len(thisId) > 0 And StrComp(thisId, SCRIPT_ID, vbTextCompare) <> 0 Then
+                thisVer = ConstValue(code, "SCRIPT_VERSION")
+                latest = ManifestVersion(manifest, thisId)
+                If Len(latest) = 0 Then
+                    skipLog = skipLog & "  - " & comp.Name & " (" & thisId & _
+                              "): not on the server" & vbCrLf
+                ElseIf StrComp(thisVer, latest, vbTextCompare) = 0 Then
+                    okCount = okCount + 1
+                    okLog = okLog & "  - " & comp.Name & "  " & thisVer & vbCrLf
+                Else
+                    staleCount = staleCount + 1
+                    staleLog = staleLog & "  - " & comp.Name & "  " & thisVer & _
+                               "  ->  " & latest & vbCrLf
+                    staleNames = staleNames & comp.Name & "|" & thisId & ";"
+                End If
             End If
-        End If
-    Next comp
+        Next comp
+    End If
 
     report = "MIDAS macro update check  [" & SCRIPT_VERSION & "]" & vbCrLf & _
              String(46, "-") & vbCrLf
@@ -136,17 +143,17 @@ Public Sub CheckMidasMacroUpdates()
     If staleCount > 0 Then report = report & vbCrLf & "OUT OF DATE (" & staleCount & "):" & vbCrLf & staleLog
     If Len(skipLog) > 0 Then report = report & vbCrLf & "NOT MANAGED:" & vbCrLf & skipLog
 
+    If Len(trustMsg) > 0 Then
+        MsgBox report & vbCrLf & "CANNOT CHECK:" & vbCrLf & trustMsg, vbExclamation
+        Exit Sub
+    End If
+
     If staleCount = 0 Then
         If okCount = 0 Then
             MsgBox report & vbCrLf & "No MIDAS modules found in this workbook.", vbInformation
         Else
             MsgBox report & vbCrLf & "OK - everything is current.", vbInformation
         End If
-        Exit Sub
-    End If
-
-    If Len(trustMsg) > 0 Then
-        MsgBox report & vbCrLf & "CANNOT UPDATE:" & vbCrLf & trustMsg, vbExclamation
         Exit Sub
     End If
 

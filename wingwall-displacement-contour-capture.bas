@@ -27,7 +27,7 @@ Option Explicit
 ' hand, so the file in the repo and the code actually running can silently
 ' diverge - check this stamp matches the constant here before concluding
 ' anything from a run. Bump it whenever this file changes.
-Private Const SCRIPT_VERSION As String = "2026-09-22d"
+Private Const SCRIPT_VERSION As String = "2026-09-23c"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -43,7 +43,7 @@ Private Const API_BASE_URL As String = "https://moa-engineers.midasit.com:443/ci
 ' cell means rotating it is a one-cell edit instead of re-pasting every
 ' module, and it keeps the secret out of the published code entirely.
 Private Const MAPI_KEY_SHEET As String = "INPUT"
-Private Const MAPI_KEY_CELL As String = "K20"
+Private Const MAPI_KEY_CELL As String = "J20"
 
 ' Read once per run and remembered, so a long job does not re-read the
 ' cell on every request.

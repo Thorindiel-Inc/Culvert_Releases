@@ -30,7 +30,7 @@ Option Explicit
 ' and the code actually running can silently diverge, and a fix that
 ' looks ineffective is very often just not re-imported yet. Check this
 ' matches before diagnosing anything from a report screenshot.
-Private Const SCRIPT_VERSION As String = "2026-09-22-live"
+Private Const SCRIPT_VERSION As String = "2026-09-23c"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -57,7 +57,7 @@ Private Const PI_CONST As Double = 3.14159265358979
 ' cell means rotating it is a one-cell edit instead of re-pasting every
 ' module, and it keeps the secret out of the published code entirely.
 Private Const MAPI_KEY_SHEET As String = "INPUT"
-Private Const MAPI_KEY_CELL As String = "K20"
+Private Const MAPI_KEY_CELL As String = "J20"
 
 ' Read once per run and remembered, so a long job does not re-read the
 ' cell on every request.
