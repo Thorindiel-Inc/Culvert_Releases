@@ -86,11 +86,11 @@ Option Explicit
 '  CONFIG
 ' ---------------------------------------------------------------------------
 
-Private Const SCRIPT_VERSION As String = "2026-09-23f"
+Private Const SCRIPT_VERSION As String = "2026-09-24a"
 
 ' One-line summary of what changed in THIS version, shown when the updater
 ' finds itself stale. One physical line, no "|".
-Private Const SCRIPT_CHANGELOG As String = "Never downgrades a module newer than the server (AHEAD), refuses a download whose version differs from the manifest (stale GitHub cache), asks its question first so it is never cut off, and gives release-feed hints instead of Civil NX ones."
+Private Const SCRIPT_CHANGELOG As String = "Recognises a password-locked VBA project and says how to unlock it for the session, instead of pointing at the Trust Center setting."
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -548,12 +548,27 @@ End Function
 
 ' "" when the VBA project object model is reachable, otherwise the message
 ' to show the user. Reading .VBComponents is what actually trips the Trust
-' Center setting, so that is what gets tested.
+' Center setting, so that is what gets tested - after the password lock,
+' which blocks the same read but needs a different fix. Protection reads 1
+' (vbext_pp_locked) until the password is entered in the VBA editor; from
+' then on the project is open for this Excel session and the saved file
+' keeps its lock.
 Private Function VbaTrustProblem() As String
 
     Dim n As Long
+    Dim prot As Long
 
     On Error Resume Next
+    prot = ThisWorkbook.VBProject.Protection
+    If Err.Number = 0 And prot = 1 Then
+        VbaTrustProblem = "The VBA project of this workbook is password-locked." & vbCrLf & _
+            "Press Alt+F11, double-click VBAProject (" & ThisWorkbook.Name & ")," & vbCrLf & _
+            "enter the password, then run the updater again." & vbCrLf & _
+            "The lock stays in the saved file - it is only open for this Excel session."
+        On Error GoTo 0
+        Exit Function
+    End If
+    Err.Clear
     n = ThisWorkbook.VBProject.VBComponents.count
     If Err.Number <> 0 Then
         Err.Clear
