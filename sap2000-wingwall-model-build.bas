@@ -1,11 +1,21 @@
 Option Explicit
 
 ' ============================================================================
-'  SAP2000 - Wingwall Model Build  (writes a .$2k shell model)
+'  SAP2000 - Wingwall Model Build  (.$2k model, opened through the API)
 '
-'  Writes <workbook name>.$2k next to this workbook, overwriting any file of
-'  that name. Open it in SAP2000 with File > Import > SAP2000 .s2k/.$2k Text
-'  File. Nothing is sent anywhere and no worksheet is changed.
+'  Writes the shell model as <workbook folder>\SAP2000\<workbook name>.$2k,
+'  then starts its OWN SAP2000 through the API, opens that file, saves
+'  <workbook name>.sdb beside it, runs the analysis and leaves SAP2000 open
+'  with the solved model. An already-open SAP2000 is never touched, and no
+'  worksheet is changed. Results are not pulled back yet.
+'
+'  WHY A FILE AND NOT OBJECT BY OBJECT like the culvert: the wall earth
+'  pressures are joint patterns, and SAP2000 17's API cannot set joint
+'  pattern values (SetPatternByXYZ/SetPatternByPressure store 0 - CSI bug
+'  84182, fixed in v18.0.0). The .$2k carries them exactly; the owner chose
+'  this hybrid on 2026-09-24. The bridge that runs SAP2000 (32-bit
+'  PowerShell, because Excel is 64-bit) is the culvert builder's, byte for
+'  byte - see the SAP2000 API BRIDGE block.
 '
 '  SAME INPUTS AND GEOMETRY AS THE MIDAS WINGWALL BUILDER. The cell readers
 '  and GenerateGeometry are copied BYTE FOR BYTE from
@@ -39,16 +49,29 @@ Option Explicit
 ' ---------------------------------------------------------------------------
 
 ' Stamped into the report title and the file. Bump with every change.
-Private Const SCRIPT_VERSION As String = "2026-09-24a"
+Private Const SCRIPT_VERSION As String = "2026-09-24c"
 
 ' One line, no "_" continuation, no "|" - read by the updater's manifest.
-Private Const SCRIPT_CHANGELOG As String = "First version: writes <workbook>.$2k beside the workbook - the MIDAS wingwall geometry as a SAP2000 shell model, meshed like the owner's example, same loads and combinations."
+Private Const SCRIPT_CHANGELOG As String = "Writes the model to SAP2000\<workbook>.$2k and opens it in SAP2000 through the API: saves the .sdb, runs the analysis and leaves SAP2000 open with the solved model."
 
 ' Identifies this module to the updater whatever it was named in Excel.
 Private Const SCRIPT_ID As String = "sap2000-wingwall-model-build"
 
 Private Const SAP_PROGRAM_VERSION As String = "17.3.0"
-Private Const SAP_FILE_EXTENSION As String = ".$2k"
+' SAP2000 runs hidden while the model is opened and solved, then its window
+' is shown and left open. True keeps it visible throughout.
+Private Const SAP_VISIBLE As Boolean = False
+
+' Longest the macro waits for SAP2000, in seconds, before it gives up and
+' closes the SAP2000 it started.
+Private Const SAP_TIMEOUT_SEC As Long = 600
+
+' Folder next to the workbook that receives the .$2k, the .sdb, SAP2000's
+' analysis files, the script and its log.
+Private Const SAP_FOLDER_NAME As String = "SAP2000"
+
+' Where WriteModelText's .$2k goes (its first line names the file).
+Private TWOK_PATH As String
 
 Private Const PI_CONST As Double = 3.14159265358979
 
@@ -235,7 +258,7 @@ Public Sub BuildSap2000WingwallModel()
 
     Dim report As String
     Dim ok As Boolean
-    Dim path As String
+    Dim folder As String, stem As String
     Dim res As String
     Dim stage As String
     Dim openingWidth As Double, foundT As Double, stemT As Double
@@ -246,11 +269,12 @@ Public Sub BuildSap2000WingwallModel()
 
     On Error GoTo Crashed
 
-    stage = "output path"
-    path = SapOutputPath()
-    ok = StepResult(report, "Output file", IIf(Len(path) = 0, _
-             "the workbook has never been saved, so there is no folder to write " & _
-             "into. Save it first.", ""))
+    stage = "SAP2000 folder"
+    folder = SapFolder()
+    ok = StepResult(report, "SAP2000 folder", IIf(Len(folder) = 0, _
+             "the workbook has never been saved, so there is no folder to put the model " & _
+             "in. Save it first.", ""))
+    If ok Then stem = SapBasePath(folder)
 
     stage = "read inputs"
     If ok Then
@@ -269,18 +293,30 @@ Public Sub BuildSap2000WingwallModel()
         ok = StepResult(report, "Mesh", BuildMesh(stemT))
     End If
 
-    stage = "assemble tables"
-    If ok Then ok = StepResult(report, "Model text", WriteModelText(foundT, stemT))
+    stage = "model file"
+    If ok Then
+        TWOK_PATH = stem & ".$2k"
+        ok = StepResult(report, "Model text", WriteModelText(foundT, stemT))
+    End If
+    If ok Then ok = StepResult(report, "Write " & TWOK_PATH, WriteOutputFile(TWOK_PATH))
 
-    stage = "write file"
-    If ok Then ok = StepResult(report, "Write " & path, WriteOutputFile(path))
+    stage = "SAP2000 script"
+    If ok Then
+        res = WriteOpenScript(stem)
+        If Len(res) = 0 Then res = WriteScriptFile(stem & "_build.ps1")
+        ok = StepResult(report, "SAP2000 script", res)
+    End If
+
+    stage = "SAP2000"
+    If ok Then ok = StepResult(report, "SAP2000: open, save, analyse", _
+                               RunSapScript(stem & "_build.ps1", stem & "_build.log"))
 
     If ok Then
         report = report & String(40, "-") & vbCrLf & _
                  JT_COUNT & " joints, " & AR_COUNT & " areas (" & MESH_N & " along each wall, " & _
                  BAND_INFO & " band(s) below the lower wall end, LEFT/RIGHT), " & SPRING_COUNT & _
                  " spring joints, " & (UBound(Split(LOADCOMB_LIST, ";")) + 1) & " combinations." & _
-                 vbCrLf & "Import in SAP2000: File > Import > SAP2000 .s2k/.$2k Text File." & vbCrLf
+                 vbCrLf & "SAP2000 is open with the analysed model:" & vbCrLf & stem & ".sdb" & vbCrLf
     End If
 
     report = VerdictFirst(report, ok)
@@ -288,6 +324,7 @@ Public Sub BuildSap2000WingwallModel()
     Exit Sub
 
 Crashed:
+    Application.StatusBar = False
     report = report & "FAIL - " & stage & ": VBA error " & Err.Number & " - " & _
              Err.Description & vbCrLf
     report = VerdictFirst(report, False)
@@ -818,20 +855,6 @@ Private Function FitReport(ByVal report As String, ByVal logName As String) As S
 
 End Function
 
-Private Function SapOutputPath() As String
-
-    Dim nm As String
-    Dim p As Long
-
-    If Len(ThisWorkbook.Path) = 0 Then Exit Function
-
-    nm = ThisWorkbook.Name
-    p = InStrRev(nm, ".")
-    If p > 1 Then nm = Left$(nm, p - 1)
-
-    SapOutputPath = ThisWorkbook.Path & "\" & nm & SAP_FILE_EXTENSION
-
-End Function
 
 Private Function WriteCombinationTable() As String
 
@@ -976,15 +999,7 @@ Private Sub TableEnd()
     Call Emit(" ")
 End Sub
 
-Private Sub Emit(ByVal s As String)
-    OUT_COUNT = OUT_COUNT + 1
-    If OUT_COUNT > UBound(OUT_LINES) Then ReDim Preserve OUT_LINES(1 To UBound(OUT_LINES) * 2)
-    OUT_LINES(OUT_COUNT) = s
-End Sub
 
-Private Function SapName(ByVal midasName As String) As String
-    SapName = Replace(midasName, "_", "")
-End Function
 
 Private Function SapQuote(ByVal s As String) As String
     s = Replace(s, """", "'")
@@ -995,9 +1010,6 @@ Private Function SapQuote(ByVal s As String) As String
     End If
 End Function
 
-Private Function SapNum(ByVal v As Double) As String
-    SapNum = JsonNum(Round(v, 9))
-End Function
 
 Private Function WriteOutputFile(ByVal path As String) As String
 
@@ -1050,6 +1062,12 @@ Private Function BuildMesh(ByVal stemT As Double) As String
     ReDim JT_X(1 To 256): ReDim JT_Y(1 To 256): ReDim JT_Z(1 To 256)
     ReDim JT_WALL(1 To 256): ReDim JT_S(1 To 256)
     ReDim AR_J(1 To 256, 1 To 4): ReDim AR_KIND(1 To 256)
+
+    If SPRING_KV <= 0 Then
+        BuildMesh = INPUT_SHEET_NAME & "!" & CELL_SUBGRADE_MODULUS & " (kv) is not above 0 - without " & _
+                    "springs the model has no supports and SAP2000 cannot solve it."
+        Exit Function
+    End If
 
     If MESH_X_FOUND <> MESH_X_WALL Then
         BuildMesh = INPUT_SHEET_NAME & "!" & CELL_MESH_X_WALL & " (" & MESH_X_WALL & ") and " & _
@@ -1354,7 +1372,7 @@ Private Function WriteModelText(ByVal foundT As Double, ByVal stemT As Double) A
     TEXT_WARNINGS = ""
     SPRING_COUNT = 0
 
-    Call Emit("File " & SapOutputPath() & " was saved on " & Month(Now) & "." & Day(Now) & _
+    Call Emit("File " & TWOK_PATH & " was saved on " & Month(Now) & "." & Day(Now) & _
               "." & Format$(Year(Now) Mod 100, "00") & " at " & Format$(Now, "hh:mm:ss"))
     Call Emit(" ")
 
@@ -1667,8 +1685,7 @@ Private Sub WriteJointSpringTable()
     Dim k As Double
 
     If SPRING_KV <= 0 Then
-        TEXT_WARNINGS = TEXT_WARNINGS & " no springs - " & INPUT_SHEET_NAME & "!" & _
-                        CELL_SUBGRADE_MODULUS & " (kv) is not above 0, so the model has no supports."
+        TEXT_WARNINGS = TEXT_WARNINGS & " no springs"
         Exit Sub
     End If
 
@@ -1733,4 +1750,305 @@ Private Sub WriteLoadCaseTables()
     Call Emit("   MassSource=MSSSRC1   Elements=Yes   Masses=Yes   Loads=No   IsDefault=Yes")
     Call TableEnd
 
+End Sub
+
+
+' ===========================================================================
+'  OPEN SCRIPT - the .$2k just written, opened in a fresh SAP2000, checked
+'  (SAP2000 must hold exactly the joints and areas the mesh made - a
+'  silently dropped row would show here), saved, analysed and shown.
+' ===========================================================================
+
+Private Function WriteOpenScript(ByVal stem As String) As String
+
+    OUT_COUNT = 0
+    ReDim OUT_LINES(1 To 64)
+
+    Call EmitSapPreamble(stem & "_build.log")
+    Call Emit("  SapChk 'Open the model file' ($m.File.OpenFile(" & PsQ(stem & ".$2k") & "))")
+    Call Emit("  SapChk 'Units kN, m, C' ($m.SetPresentUnits(6))")
+    Call Emit("  SapCount 'joints' $m.PointObj " & JT_COUNT)
+    Call Emit("  SapCount 'areas' $m.AreaObj " & AR_COUNT)
+    Call Emit("  SapLog 'OK|Model opened'")
+    Call EmitSapFinish(stem & ".sdb")
+
+End Function
+
+
+' ===========================================================================
+'  SAP2000 API BRIDGE - identical in both SAP2000 builders (drift-locked).
+'
+'  Excel is 64-bit; the SAP2000 17 API is a 32-bit .NET class that VBA
+'  cannot call. So the macro writes a PowerShell script, runs it hidden with
+'  Windows' own 32-bit PowerShell, and waits. The script starts its OWN
+'  SAP2000 (never one the user has open), builds or opens the model, saves
+'  the .sdb, runs the analysis, shows the window and exits - SAP2000 stays
+'  open. It reports one line per outcome in a log the macro reads back:
+'      OK|<step>      FAIL|<message>      DONE
+'  Every fact behind this (the 32-bit class, silent renaming, the UTF-8 BOM,
+'  the modal-dialog hang) is in CLAUDE.md, "SAP2000 audit ... and the API".
+' ===========================================================================
+
+' <workbook folder>\SAP2000, created when missing; "" if the workbook has
+' never been saved. FileSystemObject, not Dir/MkDir, so a folder name with
+' characters outside the code page still works.
+Private Function SapFolder() As String
+
+    Dim fso As Object
+    Dim p As String
+
+    If Len(ThisWorkbook.Path) = 0 Then Exit Function
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    p = ThisWorkbook.Path & "\" & SAP_FOLDER_NAME
+    If Not fso.FolderExists(p) Then fso.CreateFolder p
+    SapFolder = p
+
+End Function
+
+' <SAP2000 folder>\<workbook name without extension> - the stem of the
+' .sdb, the build script and its log.
+Private Function SapBasePath(ByVal folder As String) As String
+
+    Dim nm As String
+    Dim p As Long
+
+    nm = ThisWorkbook.Name
+    p = InStrRev(nm, ".")
+    If p > 1 Then nm = Left$(nm, p - 1)
+    SapBasePath = folder & "\" & nm
+
+End Function
+
+' A PowerShell single-quoted literal: nothing inside is interpreted, and a
+' single quote is written twice.
+Private Function PsQ(ByVal s As String) As String
+    PsQ = "'" & Replace(s, "'", "''") & "'"
+End Function
+
+' A number as a PowerShell argument: locale-invariant, in parentheses so a
+' leading minus can never read as a parameter name.
+Private Function PsNum(ByVal v As Double) As String
+    PsNum = "(" & SapNum(v) & ")"
+End Function
+
+Private Function PsBool(ByVal b As Boolean) As String
+    PsBool = IIf(b, "$true", "$false")
+End Function
+
+' The start of every build script: helpers, and a fresh hidden (or visible,
+' SAP_VISIBLE) SAP2000 with a blank kN-m model. Everything after it runs
+' inside the try block that EmitSapFinish closes.
+Private Sub EmitSapPreamble(ByVal resultPath As String)
+
+    Call Emit("# Written by " & SCRIPT_ID & " " & SCRIPT_VERSION & " - run by the macro with 32-bit PowerShell.")
+    Call Emit("# It starts its own SAP2000, builds the model, saves, analyses and leaves SAP2000 open.")
+    Call Emit("$ErrorActionPreference = 'Stop'")
+    Call Emit("$sapLog = " & PsQ(resultPath))
+    Call Emit("function SapLog($s) { Add-Content -LiteralPath $sapLog -Value $s -Encoding UTF8 }")
+    Call Emit("function SapChk($what, $ret) { if ($ret -ne 0) { throw ""$what failed (SAP2000 returned $ret)"" } }")
+    Call Emit("function SapNamed($what, $want, $got) { if ($got -ne $want) { throw ""$what came back named '$got', not '$want'"" } }")
+    Call Emit("function SapCount($what, $obj, $want) { $n = 0; $a = [string[]]@(); SapChk ""Count $what"" ($obj.GetNameList([ref]$n, [ref]$a)); if ($n -ne $want) { throw ""SAP2000 holds $n $what, the macro made $want"" } }")
+    Call Emit("$sap = $null")
+    Call Emit("try {")
+    Call Emit("  $sap = New-Object -ComObject CSI.SAP2000.API.SapObject")
+    Call Emit("  SapChk 'Start SAP2000' ($sap.ApplicationStart(6, " & PsBool(SAP_VISIBLE) & ", ''))")
+    Call Emit("  $m = $sap.SapModel")
+    Call Emit("  SapChk 'New model' ($m.InitializeNewModel(6))")
+    Call Emit("  SapChk 'Blank model' ($m.File.NewBlank())")
+    Call Emit("  SapChk 'Units kN, m, C' ($m.SetPresentUnits(6))")
+    Call Emit("  SapLog 'OK|SAP2000 started'")
+
+End Sub
+
+' Save, analyse, show, and close the try block. On any failure the script
+' closes its SAP2000 again, so nothing half-built is left behind.
+Private Sub EmitSapFinish(ByVal sdbPath As String)
+
+    Call Emit("  SapChk 'Save' ($m.File.Save(" & PsQ(sdbPath) & "))")
+    Call Emit("  SapLog " & PsQ("OK|Saved " & sdbPath))
+    Call Emit("  SapChk 'Analysis' ($m.Analyze.RunAnalysis())")
+    Call Emit("  SapLog 'OK|Analysis run'")
+    Call Emit("  if (-not $sap.Visible()) { SapChk 'Show SAP2000' ($sap.Unhide()) }")
+    Call Emit("  SapLog 'DONE'")
+    Call Emit("} catch {")
+    Call Emit("  SapLog ('FAIL|' + $_.Exception.Message)")
+    Call Emit("  if ($sap) { try { [void]$sap.ApplicationExit($false) } catch { } }")
+    Call Emit("}")
+
+End Sub
+
+' OUT_LINES as a UTF-8 file WITH a byte-order mark - Windows PowerShell 5.1
+' reads a file without one as ANSI and garbles every non-ASCII character.
+Private Function WriteScriptFile(ByVal path As String) As String
+
+    Dim st As Object
+    Dim lines() As String
+    Dim i As Long
+
+    On Error GoTo Failed
+
+    ReDim lines(1 To OUT_COUNT)
+    For i = 1 To OUT_COUNT
+        lines(i) = OUT_LINES(i)
+    Next i
+
+    Set st = CreateObject("ADODB.Stream")
+    st.Type = 2
+    st.Charset = "utf-8"
+    st.Open
+    st.WriteText Join(lines, vbCrLf) & vbCrLf
+    st.SaveToFile path, 2
+    st.Close
+    Exit Function
+
+Failed:
+    WriteScriptFile = "could not write " & path & " (" & Err.Description & ")."
+
+End Function
+
+Private Function ReadUtf8File(ByVal path As String) As String
+
+    Dim st As Object
+
+    On Error GoTo Failed
+    If Not CreateObject("Scripting.FileSystemObject").FileExists(path) Then Exit Function
+    Set st = CreateObject("ADODB.Stream")
+    st.Type = 2
+    st.Charset = "utf-8"
+    st.Open
+    st.LoadFromFile path
+    ReadUtf8File = st.ReadText
+    st.Close
+    Exit Function
+
+Failed:
+    ReadUtf8File = ""
+
+End Function
+
+' Runs the script in 32-bit PowerShell and waits for it (SAP_TIMEOUT_SEC at
+' most), keeping Excel responsive. Returns "" when the log ends in DONE,
+' otherwise the reason. On a timeout it ends the PowerShell process and the
+' SAP2000 it started - a hidden SAP2000 stuck on a dialog would otherwise
+' block forever - and nothing else.
+Private Function RunSapScript(ByVal scriptPath As String, ByVal resultPath As String) As String
+
+    Dim fso As Object, wmi As Object, startup As Object
+    Dim psExe As String, cmd As String
+    Dim pid As Variant
+    Dim rc As Long
+    Dim t0 As Single, waited As Single
+    Dim outcome As String
+    Dim p As Long, q As Long
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If fso.FileExists(resultPath) Then fso.DeleteFile resultPath, True
+
+    psExe = Environ$("WINDIR") & "\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
+    If Not fso.FileExists(psExe) Then psExe = Environ$("WINDIR") & "\System32\WindowsPowerShell\v1.0\powershell.exe"
+    cmd = """" & psExe & """ -NoProfile -NonInteractive -ExecutionPolicy Bypass -File """ & scriptPath & """"
+
+    Set wmi = GetObject("winmgmts:\\.\root\cimv2")
+    Set startup = wmi.Get("Win32_ProcessStartup").SpawnInstance_
+    startup.ShowWindow = 0
+    rc = wmi.Get("Win32_Process").Create(cmd, Null, startup, pid)
+    If rc <> 0 Then
+        RunSapScript = "could not start 32-bit PowerShell (" & psExe & ", WMI code " & rc & ")."
+        Exit Function
+    End If
+
+    t0 = Timer
+    Do
+        waited = SecondsSince(t0)
+        If wmi.ExecQuery("SELECT ProcessId FROM Win32_Process WHERE ProcessId = " & pid).Count = 0 Then Exit Do
+        If waited > SAP_TIMEOUT_SEC Then
+            Call EndSapScript(wmi, pid)
+            Application.StatusBar = False
+            RunSapScript = "SAP2000 did not finish within " & SAP_TIMEOUT_SEC & " s - most likely a " & _
+                           "SAP2000 dialog was waiting for an answer (an unstable or degenerate model does " & _
+                           "that). The script and its SAP2000 were closed. Last step reached: " & _
+                           LastOkStep(ReadUtf8File(resultPath))
+            Exit Function
+        End If
+        Application.StatusBar = "SAP2000: building and analysing the model - " & Int(waited) & " s"
+        Call PauseSeconds(0.5)
+    Loop
+    Application.StatusBar = False
+
+    outcome = ReadUtf8File(resultPath)
+    If InStr(1, outcome, "DONE", vbBinaryCompare) > 0 Then Exit Function
+
+    p = InStr(1, outcome, "FAIL|", vbBinaryCompare)
+    If p > 0 Then
+        q = InStr(p, outcome, vbCr)
+        If q = 0 Then q = Len(outcome) + 1
+        RunSapScript = Mid$(outcome, p + 5, q - p - 5)
+    Else
+        RunSapScript = "the SAP2000 script ended without reporting success. Last step reached: " & _
+                       LastOkStep(outcome) & ". Run " & scriptPath & " by hand in 32-bit PowerShell to see why."
+    End If
+
+End Function
+
+' Ends one PowerShell process and every SAP2000 it started.
+Private Sub EndSapScript(ByVal wmi As Object, ByVal pid As Variant)
+
+    Dim proc As Object
+
+    On Error Resume Next
+    For Each proc In wmi.ExecQuery("SELECT * FROM Win32_Process WHERE ParentProcessId = " & pid)
+        If LCase$(proc.Name) = "sap2000.exe" Then proc.Terminate
+    Next proc
+    For Each proc In wmi.ExecQuery("SELECT * FROM Win32_Process WHERE ProcessId = " & pid)
+        proc.Terminate
+    Next proc
+    On Error GoTo 0
+
+End Sub
+
+Private Function LastOkStep(ByVal outcome As String) As String
+
+    Dim p As Long, q As Long
+
+    p = InStrRev(outcome, "OK|")
+    If p = 0 Then
+        LastOkStep = "none (SAP2000 may not have started)"
+    Else
+        q = InStr(p, outcome, vbCr)
+        If q = 0 Then q = Len(outcome) + 1
+        LastOkStep = Mid$(outcome, p + 3, q - p - 3)
+    End If
+
+End Function
+
+' Seconds since t0, across midnight (Timer restarts at 0).
+Private Function SecondsSince(ByVal t0 As Single) As Single
+    SecondsSince = Timer - t0
+    If SecondsSince < 0 Then SecondsSince = SecondsSince + 86400
+End Function
+
+' DoEvents + Timer, not Application.Wait (whole seconds only, and it freezes
+' Excel).
+Private Sub PauseSeconds(ByVal secs As Single)
+    Dim t0 As Single
+    t0 = Timer
+    Do While SecondsSince(t0) < secs
+        DoEvents
+    Loop
+End Sub
+
+' MIDAS case names -> SAP pattern names: EHS2_L -> EHS2L.
+Private Function SapName(ByVal midasName As String) As String
+    SapName = Replace(midasName, "_", "")
+End Function
+
+' Locale-invariant number, rounded so float noise never reaches SAP2000.
+Private Function SapNum(ByVal v As Double) As String
+    SapNum = JsonNum(Round(v, 9))
+End Function
+
+Private Sub Emit(ByVal s As String)
+    OUT_COUNT = OUT_COUNT + 1
+    If OUT_COUNT > UBound(OUT_LINES) Then ReDim Preserve OUT_LINES(1 To UBound(OUT_LINES) * 2)
+    OUT_LINES(OUT_COUNT) = s
 End Sub

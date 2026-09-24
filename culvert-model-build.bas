@@ -28,14 +28,14 @@ Option Explicit
 ' so a screenshot of a run does not otherwise say which build produced it -
 ' bump this whenever the file changes and check it matches before
 ' diagnosing anything from a report.
-Private Const SCRIPT_VERSION As String = "2026-09-23f"
+Private Const SCRIPT_VERSION As String = "2026-09-24a"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Audit rev 2: adds ENV_EQ (seismic only), required dimensions must be present and above 0, an error value in an optional cell stops the build, the seismic gate reads this workbook and shows its source (stops if undetermined), long timeout for doc/ANAL and post/TABLE, result-table combinations derived from the generated list, verdict first in the report."
+Private Const SCRIPT_CHANGELOG As String = "No haunch (B8 or B9 = 0) no longer creates zero-length members - they are left out and their neighbours meet; equal top and bottom earth pressure (e.g. a blank row) gives a uniform profile instead of an Overflow error."
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -1138,11 +1138,27 @@ End Function
 '      SECT 2 (DUVAR / thin wall). This adds a rigid zone at the base of
 '      each wall, mirroring the rigid zone that already existed at the
 '      top (elements 14/15, also SECT 8) where the wall meets the slab.
+'
+'  NO HAUNCH (2026-09-24, owner's decision after the SAP2000 audit): a
+'  haunch dimension of 0 (or less) would put a haunch node on top of its
+'  neighbour and give zero-length members, which SAP2000 cannot solve.
+'  Those members are left out and their neighbours join at the shared node:
+'    B8 <= 0: no nodes 11/12, no elements 12/13; walls 10/11 run from 13/14
+'    B9 <= 0: no nodes 17/18, no elements 17/19; slab 18 runs 16 -> 19
+'  Every other element keeps its number (gaps are fine), and AddLoad drops
+'  loads aimed at a member that does not exist.
 Private Sub GenerateGeometry()
 
     Dim dx1 As Double, dx2 As Double, dz2 As Double
     Dim sHaunchSlab As Long, sHaunchWall As Long, sRigidFound As Long
     Dim n As String, e As String
+    Dim nWallTopL As Long, nWallTopR As Long, nSlabL As Long, nSlabR As Long
+
+    ' Where the plain wall and slab members end when a haunch is absent.
+    nWallTopL = IIf(DIM_SLAB_HAUNCH > 0, 11, 13)
+    nWallTopR = IIf(DIM_SLAB_HAUNCH > 0, 12, 14)
+    nSlabL = IIf(DIM_WALL_HAUNCH > 0, 17, 16)
+    nSlabR = IIf(DIM_WALL_HAUNCH > 0, 18, 19)
 
     ' Haunch members fall back to the plain slab/wall section when their
     ' gate dimension is zero. NOTE the cross-gating, straight from the MCT:
@@ -1172,14 +1188,18 @@ Private Sub GenerateGeometry()
         n = n & ";" & NodeRow(8, DIM_EXT + DIM_WALL_T + DIM_SPAN + DIM_WALL_T + DIM_EXT, 0)
         n = n & ";" & NodeRow(9, dx1, DIM_FOUND_T / 2)
         n = n & ";" & NodeRow(10, dx2, DIM_FOUND_T / 2)
-        n = n & ";" & NodeRow(11, dx1, DIM_FOUND_T / 2 + DIM_WALL_H - DIM_SLAB_HAUNCH)
-        n = n & ";" & NodeRow(12, dx2, DIM_FOUND_T / 2 + DIM_WALL_H - DIM_SLAB_HAUNCH)
+        If DIM_SLAB_HAUNCH > 0 Then
+            n = n & ";" & NodeRow(11, dx1, DIM_FOUND_T / 2 + DIM_WALL_H - DIM_SLAB_HAUNCH)
+            n = n & ";" & NodeRow(12, dx2, DIM_FOUND_T / 2 + DIM_WALL_H - DIM_SLAB_HAUNCH)
+        End If
         n = n & ";" & NodeRow(13, dx1, DIM_FOUND_T / 2 + DIM_WALL_H)
         n = n & ";" & NodeRow(14, dx2, DIM_FOUND_T / 2 + DIM_WALL_H)
         n = n & ";" & NodeRow(15, dx1, dz2)
         n = n & ";" & NodeRow(16, dx1 + DIM_WALL_T / 2, dz2)
-        n = n & ";" & NodeRow(17, dx1 + DIM_WALL_T / 2 + DIM_WALL_HAUNCH, dz2)
-        n = n & ";" & NodeRow(18, dx1 + DIM_WALL_T / 2 + DIM_SPAN - DIM_WALL_HAUNCH, dz2)
+        If DIM_WALL_HAUNCH > 0 Then
+            n = n & ";" & NodeRow(17, dx1 + DIM_WALL_T / 2 + DIM_WALL_HAUNCH, dz2)
+            n = n & ";" & NodeRow(18, dx1 + DIM_WALL_T / 2 + DIM_SPAN - DIM_WALL_HAUNCH, dz2)
+        End If
         n = n & ";" & NodeRow(19, dx1 + DIM_WALL_T / 2 + DIM_SPAN, dz2)
         n = n & ";" & NodeRow(20, dx1 + DIM_WALL_T + DIM_SPAN, dz2)
 
@@ -1192,16 +1212,18 @@ Private Sub GenerateGeometry()
         e = e & ";" & ElemRow(7, 4, 7, 8, 0)
         e = e & ";" & ElemRow(8, 8, 9, 3, -180)
         e = e & ";" & ElemRow(9, 8, 10, 6, 0)
-        e = e & ";" & ElemRow(10, 2, 11, 9, -180)
-        e = e & ";" & ElemRow(11, 2, 12, 10, 0)
-        e = e & ";" & ElemRow(12, sHaunchWall, 13, 11, -180)
-        e = e & ";" & ElemRow(13, sHaunchWall, 14, 12, 0)
+        e = e & ";" & ElemRow(10, 2, nWallTopL, 9, -180)
+        e = e & ";" & ElemRow(11, 2, nWallTopR, 10, 0)
+        If DIM_SLAB_HAUNCH > 0 Then
+            e = e & ";" & ElemRow(12, sHaunchWall, 13, 11, -180)
+            e = e & ";" & ElemRow(13, sHaunchWall, 14, 12, 0)
+        End If
         e = e & ";" & ElemRow(14, 8, 15, 13, -180)
         e = e & ";" & ElemRow(15, 8, 20, 14, 0)
         e = e & ";" & ElemRow(16, 7, 15, 16, 0)
-        e = e & ";" & ElemRow(17, sHaunchSlab, 16, 17, 0)
-        e = e & ";" & ElemRow(18, 1, 17, 18, 0)
-        e = e & ";" & ElemRow(19, sHaunchSlab, 18, 19, 0)
+        If DIM_WALL_HAUNCH > 0 Then e = e & ";" & ElemRow(17, sHaunchSlab, 16, 17, 0)
+        e = e & ";" & ElemRow(18, 1, nSlabL, nSlabR, 0)
+        If DIM_WALL_HAUNCH > 0 Then e = e & ";" & ElemRow(19, sHaunchSlab, 18, 19, 0)
         e = e & ";" & ElemRow(20, 7, 19, 20, 0)
 
     Else
@@ -1219,14 +1241,18 @@ Private Sub GenerateGeometry()
         n = n & ";" & NodeRow(6, dx2, 0)
         n = n & ";" & NodeRow(9, dx1, DIM_FOUND_T / 2)
         n = n & ";" & NodeRow(10, dx2, DIM_FOUND_T / 2)
-        n = n & ";" & NodeRow(11, dx1, DIM_FOUND_T / 2 + DIM_WALL_H - DIM_SLAB_HAUNCH)
-        n = n & ";" & NodeRow(12, dx2, DIM_FOUND_T / 2 + DIM_WALL_H - DIM_SLAB_HAUNCH)
+        If DIM_SLAB_HAUNCH > 0 Then
+            n = n & ";" & NodeRow(11, dx1, DIM_FOUND_T / 2 + DIM_WALL_H - DIM_SLAB_HAUNCH)
+            n = n & ";" & NodeRow(12, dx2, DIM_FOUND_T / 2 + DIM_WALL_H - DIM_SLAB_HAUNCH)
+        End If
         n = n & ";" & NodeRow(13, dx1, DIM_FOUND_T / 2 + DIM_WALL_H)
         n = n & ";" & NodeRow(14, dx2, DIM_FOUND_T / 2 + DIM_WALL_H)
         n = n & ";" & NodeRow(15, dx1, dz2)
         n = n & ";" & NodeRow(16, dx1 + DIM_WALL_T / 2, dz2)
-        n = n & ";" & NodeRow(17, dx1 + DIM_WALL_T / 2 + DIM_WALL_HAUNCH, dz2)
-        n = n & ";" & NodeRow(18, dx1 + DIM_WALL_T / 2 + DIM_SPAN - DIM_WALL_HAUNCH, dz2)
+        If DIM_WALL_HAUNCH > 0 Then
+            n = n & ";" & NodeRow(17, dx1 + DIM_WALL_T / 2 + DIM_WALL_HAUNCH, dz2)
+            n = n & ";" & NodeRow(18, dx1 + DIM_WALL_T / 2 + DIM_SPAN - DIM_WALL_HAUNCH, dz2)
+        End If
         n = n & ";" & NodeRow(19, dx1 + DIM_WALL_T / 2 + DIM_SPAN, dz2)
         n = n & ";" & NodeRow(20, dx1 + DIM_WALL_T + DIM_SPAN, dz2)
 
@@ -1235,16 +1261,18 @@ Private Sub GenerateGeometry()
         e = e & ";" & ElemRow(5, sRigidFound, 5, 6, 0)
         e = e & ";" & ElemRow(8, 8, 9, 3, -180)
         e = e & ";" & ElemRow(9, 8, 10, 6, 0)
-        e = e & ";" & ElemRow(10, 2, 11, 9, -180)
-        e = e & ";" & ElemRow(11, 2, 12, 10, 0)
-        e = e & ";" & ElemRow(12, sHaunchWall, 13, 11, -180)
-        e = e & ";" & ElemRow(13, sHaunchWall, 14, 12, 0)
+        e = e & ";" & ElemRow(10, 2, nWallTopL, 9, -180)
+        e = e & ";" & ElemRow(11, 2, nWallTopR, 10, 0)
+        If DIM_SLAB_HAUNCH > 0 Then
+            e = e & ";" & ElemRow(12, sHaunchWall, 13, 11, -180)
+            e = e & ";" & ElemRow(13, sHaunchWall, 14, 12, 0)
+        End If
         e = e & ";" & ElemRow(14, 8, 15, 13, -180)
         e = e & ";" & ElemRow(15, 8, 20, 14, 0)
         e = e & ";" & ElemRow(16, 7, 15, 16, 0)
-        e = e & ";" & ElemRow(17, sHaunchSlab, 16, 17, 0)
-        e = e & ";" & ElemRow(18, 1, 17, 18, 0)
-        e = e & ";" & ElemRow(19, sHaunchSlab, 18, 19, 0)
+        If DIM_WALL_HAUNCH > 0 Then e = e & ";" & ElemRow(17, sHaunchSlab, 16, 17, 0)
+        e = e & ";" & ElemRow(18, 1, nSlabL, nSlabR, 0)
+        If DIM_WALL_HAUNCH > 0 Then e = e & ";" & ElemRow(19, sHaunchSlab, 18, 19, 0)
         e = e & ";" & ElemRow(20, 7, 19, 20, 0)
 
     End If
@@ -1286,10 +1314,20 @@ End Sub
 ' Linear earth-pressure profile. "l" is the distance from the wall top up
 ' to where the linear profile would reach zero, back-figured from the top
 ' and bottom intensities, then each member's end pressure is read off it.
-' Division by zero if pTop = pBot (a uniform profile) - same as the MCT.
+' Equal top and bottom (a uniform profile, or a blank row = 0/0) is handled
+' first: the formula below divides by (pTop - pBot), which raised VBA error
+' 6 "Overflow" and stopped the build (SAP2000 audit, 2026-09-24).
 Private Sub EhBlock(ByVal pTop As Double, ByVal pBot As Double, ByRef o() As Double)
 
     Dim l As Double
+    Dim i As Long
+
+    If pTop = pBot Then
+        For i = 1 To 8
+            o(i) = pBot
+        Next i
+        Exit Sub
+    End If
 
     l = ((-DIM_SLAB_T / 2 - DIM_FOUND_T / 2 - DIM_WALL_H) * pBot) / (pTop - pBot)
 
@@ -1505,6 +1543,10 @@ End Sub
 Private Sub AddLoad(ByVal elemNo As Long, ByVal lcname As String, ByVal cmd As String, _
                     ByVal loadDir As String, ByVal p1 As Double, ByVal p2 As Double)
 
+    ' A haunch member left out by GenerateGeometry (no haunch) carries
+    ' nothing; its neighbours already span the whole height/length.
+    If Not ElementExists(elemNo) Then Exit Sub
+
     If Len(BEAMLOAD_LIST) > 0 Then BEAMLOAD_LIST = BEAMLOAD_LIST & ";"
 
     BEAMLOAD_LIST = BEAMLOAD_LIST & elemNo & "|" & lcname & "|" & cmd & "|" & loadDir & _
@@ -1512,6 +1554,11 @@ Private Sub AddLoad(ByVal elemNo As Long, ByVal lcname As String, ByVal cmd As S
                     "|" & JsonNum(Round(p2, LOAD_ROUND_DP))
 
 End Sub
+
+' True when ELEM_LIST ("no|sect|n1|n2|angle;...") holds element elemNo.
+Private Function ElementExists(ByVal elemNo As Long) As Boolean
+    ElementExists = (InStr(1, ";" & ELEM_LIST, ";" & elemNo & "|", vbBinaryCompare) > 0)
+End Function
 
 
 ' ===========================================================================

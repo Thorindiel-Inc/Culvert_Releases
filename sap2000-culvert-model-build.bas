@@ -1,13 +1,19 @@
 Option Explicit
 
 ' ============================================================================
-'  SAP2000 - Box Culvert Model Build  (writes a .$2k text model)
+'  SAP2000 - Box Culvert Model Build  (through the SAP2000 API)
 '
-'  Writes <workbook name>.$2k next to this workbook - e.g. 3.00m.xlsm gives
-'  3.00m.$2k in the same folder - overwriting any file of that name. Open it
-'  in SAP2000 with File > Import > SAP2000 .s2k/.$2k Text File. Nothing is
-'  sent anywhere and no worksheet is changed; SAP_INPUT and SAP_RESULTS are
-'  not read or written (SAP_INPUT is an older formula generator, left as-is).
+'  Builds the culvert in SAP2000 object by object, saves it as
+'  <workbook folder>\SAP2000\<workbook name>.sdb, runs the analysis and
+'  leaves SAP2000 open with the solved model. It starts its OWN SAP2000 -
+'  one already open is never touched. No worksheet is changed; SAP_INPUT and
+'  SAP_RESULTS are not read or written. Results are not pulled back yet.
+'
+'  HOW IT REACHES SAP2000: Excel is 64-bit and the SAP2000 17 API is 32-bit
+'  only, so the macro writes a PowerShell script (SAP2000\<name>_build.ps1,
+'  kept for inspection) and runs it with Windows' 32-bit PowerShell; see
+'  the SAP2000 API BRIDGE block. The script checks every API call and every
+'  name SAP2000 hands back, and logs to SAP2000\<name>_build.log.
 '
 '  SAME MODEL AS THE MIDAS BUILDER. Inputs, geometry, loads and combinations
 '  come from procedures copied BYTE FOR BYTE out of
@@ -16,18 +22,18 @@ Option Explicit
 '  seismic gate). tests/verify_sap2000_build.py fails if a copy drifts, so a
 '  change to the MIDAS model has to be carried over here too. Only the
 '  SAP-specific part is this module's own: dividing and renumbering, the
-'  load translation and the table writer.
+'  load translation and the build script.
 '
-'  What the MIDAS builder does through the API happens here in the text:
+'  What the MIDAS builder does through its API happens here as well:
 '    ope/DIVIDEELEM   elements 18, 10, 11, 4 split into INPUT!K15 equal
 '                     frames; each piece carries its share of a trapezoid
 '    db/NSPR          joint springs on every z = 0 joint, same tributary rule
-'    db/BODF          DL = SelfWtMult 1; ATA = FRAME LOADS - GRAVITY along X
+'    db/BODF          DL = self-weight multiplier 1; ATA = gravity along X
 '  Joints and frames are numbered 1..n in the MIDAS element order
 '  (foundation, walls, slab), division joints after the original ones.
 '
-'  Differences from the hand-built reference model (SAP2000/*.$2k in the
-'  repo), all by the owner's decision on 2026-09-24:
+'  Owner's decisions (2026-09-24), against the hand-built reference model
+'  old/SAP2000/3.00x3.00_Hd_3.0m.$2k:
 '    - full MIDAS load set (20 cases less the seismic pair when the gate is
 '      off) and all 33/35 combinations, not the reference's subset
 '    - rigid-zone and haunch members get their own sections (MIDAS_INPUT
@@ -36,12 +42,13 @@ Option Explicit
 '      stable; the reference had all six DOF
 '    - load-case names lose their "_" (EHS2_L -> EHS2L, as the reference
 '      names them); combination names are kept exactly as in MIDAS
-'    - no GUIDs: SAP2000 assigns them on import
+'    - built through the API (2026-09-24), replacing the .$2k text file
 '  Ec is MIDAS_INPUT!B43, falling back to 33 GPa (EN C30/37, the reference's
 '  value) - NOT to the MIDAS builder's 26.291 GPa fallback.
 '
 '  No restraints are written: the foundation springs are the supports, as
-'  in the reference.
+'  in the reference. Design-only data of the old text file (column rebar,
+'  A615Gr60) is not built - the model is for analysis.
 ' ============================================================================
 
 
@@ -50,19 +57,27 @@ Option Explicit
 ' ---------------------------------------------------------------------------
 
 ' Stamped into the report title. Bump with every change to this file.
-Private Const SCRIPT_VERSION As String = "2026-09-24a"
+Private Const SCRIPT_VERSION As String = "2026-09-24c"
 
 ' One line, no "_" continuation, no "|" - read by the updater's manifest.
-Private Const SCRIPT_CHANGELOG As String = "First version: writes <workbook>.$2k beside the workbook from MIDAS_INPUT, same geometry, loads and combinations as the MIDAS culvert builder."
+Private Const SCRIPT_CHANGELOG As String = "Builds the culvert in SAP2000 through its API (object by object) instead of writing a .$2k file: saves SAP2000\<workbook>.sdb, runs the analysis and leaves SAP2000 open with the solved model."
 
 ' Identifies this module to the updater whatever it was named in Excel.
 Private Const SCRIPT_ID As String = "sap2000-culvert-model-build"
 
-' Written into PROGRAM CONTROL. The reference file came from 17.3.0; later
-' versions import older text files.
-Private Const SAP_PROGRAM_VERSION As String = "17.3.0"
+' SAP2000 runs hidden while the model is built and solved, then its window
+' is shown and left open. True keeps it visible throughout (slower, and a
+' click in SAP2000 mid-build can interfere).
+Private Const SAP_VISIBLE As Boolean = False
 
-Private Const SAP_FILE_EXTENSION As String = ".$2k"
+' Longest the macro waits for SAP2000, in seconds, before it gives up and
+' closes the SAP2000 it started (a hidden SAP2000 waiting on a dialog would
+' otherwise block Excel for good). One culvert takes a few seconds.
+Private Const SAP_TIMEOUT_SEC As Long = 600
+
+' Folder next to the workbook that receives the .sdb, SAP2000's analysis
+' files, the build script and its log.
+Private Const SAP_FOLDER_NAME As String = "SAP2000"
 
 ' Concrete, as the reference file defines it (EN 1992-1-1 C30/37).
 Private Const MATERIAL_NAME As String = "C30/37"
@@ -229,7 +244,7 @@ Public Sub BuildSap2000Model()
 
     Dim report As String
     Dim ok As Boolean
-    Dim path As String
+    Dim folder As String, stem As String
     Dim res As String
     Dim stage As String
 
@@ -241,7 +256,7 @@ Public Sub BuildSap2000Model()
     stage = "seismic gate"
     Call InitSeismicGate
     If Not SEISMIC_GATE_KNOWN Then
-        MsgBox report & "STOPPED - no file was written." & vbCrLf & vbCrLf & _
+        MsgBox report & "STOPPED - nothing was built." & vbCrLf & vbCrLf & _
                "The seismic gate " & SEISMIC_GATE_SOURCE & "." & vbCrLf & vbCrLf & _
                "Fix those cells, or set SEISMIC_GATE_OVERRIDE to 0 (off) or 1 (on) " & _
                "at the top of this module.", vbExclamation
@@ -250,11 +265,12 @@ Public Sub BuildSap2000Model()
     report = report & "NOTE - seismic gate is " & IIf(SEISMIC_ACTIVE, "ON", "OFF") & _
              " (" & SEISMIC_GATE_SOURCE & ")." & vbCrLf & String(40, "-") & vbCrLf
 
-    stage = "output path"
-    path = SapOutputPath()
-    ok = StepResult(report, "Output file", IIf(Len(path) = 0, _
-             "the workbook has never been saved, so there is no folder to write " & _
-             "into. Save it first.", ""))
+    stage = "SAP2000 folder"
+    folder = SapFolder()
+    ok = StepResult(report, "SAP2000 folder", IIf(Len(folder) = 0, _
+             "the workbook has never been saved, so there is no folder to put the model " & _
+             "in. Save it first.", ""))
+    If ok Then stem = SapBasePath(folder)
 
     stage = "read inputs"
     If ok Then
@@ -263,6 +279,14 @@ Public Sub BuildSap2000Model()
             res = "WARN: used built-in defaults -" & INPUT_FALLBACKS
         End If
         ok = StepResult(report, "Read inputs", res)
+    End If
+
+    ' Without springs the model has no supports and SAP2000 stops on an
+    ' instability dialog - refuse before anything is started.
+    If ok And SPRING_KZ_MODULUS <= 0 Then
+        ok = StepResult(report, "Springs", INPUT_SHEET_NAME & "!B42 (subgrade modulus) is " & _
+                        SapNum(SPRING_KZ_MODULUS) & " - without springs the model has no supports " & _
+                        "and SAP2000 cannot solve it.")
     End If
 
     stage = "generate model"
@@ -275,18 +299,23 @@ Public Sub BuildSap2000Model()
         ok = StepResult(report, "Divide + number", ExpandModel())
     End If
 
-    stage = "assemble tables"
-    If ok Then ok = StepResult(report, "Model text", WriteModelText())
+    stage = "build script"
+    If ok Then
+        res = WriteBuildScript(stem & ".sdb", stem & "_build.log")
+        If Len(res) = 0 Then res = WriteScriptFile(stem & "_build.ps1")
+        ok = StepResult(report, "Build script", res)
+    End If
 
-    stage = "write file"
-    If ok Then ok = StepResult(report, "Write " & path, WriteOutputFile(path))
+    stage = "SAP2000"
+    If ok Then ok = StepResult(report, "SAP2000: build, save, analyse", _
+                               RunSapScript(stem & "_build.ps1", stem & "_build.log"))
 
     If ok Then
         report = report & String(40, "-") & vbCrLf & _
                  JT_COUNT & " joints, " & FR_COUNT & " frames (divided: " & DIVIDED_ELEMS & _
                  "), " & SPRING_COUNT & " springs, " & LOAD_COUNT & " frame loads, " & _
                  (UBound(Split(LOADCOMB_LIST, ";")) + 1) & " combinations." & vbCrLf & _
-                 "Import in SAP2000: File > Import > SAP2000 .s2k/.$2k Text File." & vbCrLf
+                 "SAP2000 is open with the analysed model:" & vbCrLf & stem & ".sdb" & vbCrLf
     End If
 
     report = VerdictFirst(report, ok)
@@ -294,29 +323,13 @@ Public Sub BuildSap2000Model()
     Exit Sub
 
 Crashed:
+    Application.StatusBar = False
     report = report & "FAIL - " & stage & ": VBA error " & Err.Number & " - " & _
              Err.Description & vbCrLf
     report = VerdictFirst(report, False)
     MsgBox FitReport(report, SCRIPT_ID), vbExclamation
 
 End Sub
-
-' <folder of this workbook>\<workbook name without extension>.$2k, or ""
-' when the workbook has never been saved.
-Private Function SapOutputPath() As String
-
-    Dim nm As String
-    Dim p As Long
-
-    If Len(ThisWorkbook.Path) = 0 Then Exit Function
-
-    nm = ThisWorkbook.Name
-    p = InStrRev(nm, ".")
-    If p > 1 Then nm = Left$(nm, p - 1)
-
-    SapOutputPath = ThisWorkbook.Path & "\" & nm & SAP_FILE_EXTENSION
-
-End Function
 
 
 ' ===========================================================================
@@ -611,6 +624,13 @@ Private Sub GenerateGeometry()
     Dim dx1 As Double, dx2 As Double, dz2 As Double
     Dim sHaunchSlab As Long, sHaunchWall As Long, sRigidFound As Long
     Dim n As String, e As String
+    Dim nWallTopL As Long, nWallTopR As Long, nSlabL As Long, nSlabR As Long
+
+    ' Where the plain wall and slab members end when a haunch is absent.
+    nWallTopL = IIf(DIM_SLAB_HAUNCH > 0, 11, 13)
+    nWallTopR = IIf(DIM_SLAB_HAUNCH > 0, 12, 14)
+    nSlabL = IIf(DIM_WALL_HAUNCH > 0, 17, 16)
+    nSlabR = IIf(DIM_WALL_HAUNCH > 0, 18, 19)
 
     ' Haunch members fall back to the plain slab/wall section when their
     ' gate dimension is zero. NOTE the cross-gating, straight from the MCT:
@@ -640,14 +660,18 @@ Private Sub GenerateGeometry()
         n = n & ";" & NodeRow(8, DIM_EXT + DIM_WALL_T + DIM_SPAN + DIM_WALL_T + DIM_EXT, 0)
         n = n & ";" & NodeRow(9, dx1, DIM_FOUND_T / 2)
         n = n & ";" & NodeRow(10, dx2, DIM_FOUND_T / 2)
-        n = n & ";" & NodeRow(11, dx1, DIM_FOUND_T / 2 + DIM_WALL_H - DIM_SLAB_HAUNCH)
-        n = n & ";" & NodeRow(12, dx2, DIM_FOUND_T / 2 + DIM_WALL_H - DIM_SLAB_HAUNCH)
+        If DIM_SLAB_HAUNCH > 0 Then
+            n = n & ";" & NodeRow(11, dx1, DIM_FOUND_T / 2 + DIM_WALL_H - DIM_SLAB_HAUNCH)
+            n = n & ";" & NodeRow(12, dx2, DIM_FOUND_T / 2 + DIM_WALL_H - DIM_SLAB_HAUNCH)
+        End If
         n = n & ";" & NodeRow(13, dx1, DIM_FOUND_T / 2 + DIM_WALL_H)
         n = n & ";" & NodeRow(14, dx2, DIM_FOUND_T / 2 + DIM_WALL_H)
         n = n & ";" & NodeRow(15, dx1, dz2)
         n = n & ";" & NodeRow(16, dx1 + DIM_WALL_T / 2, dz2)
-        n = n & ";" & NodeRow(17, dx1 + DIM_WALL_T / 2 + DIM_WALL_HAUNCH, dz2)
-        n = n & ";" & NodeRow(18, dx1 + DIM_WALL_T / 2 + DIM_SPAN - DIM_WALL_HAUNCH, dz2)
+        If DIM_WALL_HAUNCH > 0 Then
+            n = n & ";" & NodeRow(17, dx1 + DIM_WALL_T / 2 + DIM_WALL_HAUNCH, dz2)
+            n = n & ";" & NodeRow(18, dx1 + DIM_WALL_T / 2 + DIM_SPAN - DIM_WALL_HAUNCH, dz2)
+        End If
         n = n & ";" & NodeRow(19, dx1 + DIM_WALL_T / 2 + DIM_SPAN, dz2)
         n = n & ";" & NodeRow(20, dx1 + DIM_WALL_T + DIM_SPAN, dz2)
 
@@ -660,16 +684,18 @@ Private Sub GenerateGeometry()
         e = e & ";" & ElemRow(7, 4, 7, 8, 0)
         e = e & ";" & ElemRow(8, 8, 9, 3, -180)
         e = e & ";" & ElemRow(9, 8, 10, 6, 0)
-        e = e & ";" & ElemRow(10, 2, 11, 9, -180)
-        e = e & ";" & ElemRow(11, 2, 12, 10, 0)
-        e = e & ";" & ElemRow(12, sHaunchWall, 13, 11, -180)
-        e = e & ";" & ElemRow(13, sHaunchWall, 14, 12, 0)
+        e = e & ";" & ElemRow(10, 2, nWallTopL, 9, -180)
+        e = e & ";" & ElemRow(11, 2, nWallTopR, 10, 0)
+        If DIM_SLAB_HAUNCH > 0 Then
+            e = e & ";" & ElemRow(12, sHaunchWall, 13, 11, -180)
+            e = e & ";" & ElemRow(13, sHaunchWall, 14, 12, 0)
+        End If
         e = e & ";" & ElemRow(14, 8, 15, 13, -180)
         e = e & ";" & ElemRow(15, 8, 20, 14, 0)
         e = e & ";" & ElemRow(16, 7, 15, 16, 0)
-        e = e & ";" & ElemRow(17, sHaunchSlab, 16, 17, 0)
-        e = e & ";" & ElemRow(18, 1, 17, 18, 0)
-        e = e & ";" & ElemRow(19, sHaunchSlab, 18, 19, 0)
+        If DIM_WALL_HAUNCH > 0 Then e = e & ";" & ElemRow(17, sHaunchSlab, 16, 17, 0)
+        e = e & ";" & ElemRow(18, 1, nSlabL, nSlabR, 0)
+        If DIM_WALL_HAUNCH > 0 Then e = e & ";" & ElemRow(19, sHaunchSlab, 18, 19, 0)
         e = e & ";" & ElemRow(20, 7, 19, 20, 0)
 
     Else
@@ -687,14 +713,18 @@ Private Sub GenerateGeometry()
         n = n & ";" & NodeRow(6, dx2, 0)
         n = n & ";" & NodeRow(9, dx1, DIM_FOUND_T / 2)
         n = n & ";" & NodeRow(10, dx2, DIM_FOUND_T / 2)
-        n = n & ";" & NodeRow(11, dx1, DIM_FOUND_T / 2 + DIM_WALL_H - DIM_SLAB_HAUNCH)
-        n = n & ";" & NodeRow(12, dx2, DIM_FOUND_T / 2 + DIM_WALL_H - DIM_SLAB_HAUNCH)
+        If DIM_SLAB_HAUNCH > 0 Then
+            n = n & ";" & NodeRow(11, dx1, DIM_FOUND_T / 2 + DIM_WALL_H - DIM_SLAB_HAUNCH)
+            n = n & ";" & NodeRow(12, dx2, DIM_FOUND_T / 2 + DIM_WALL_H - DIM_SLAB_HAUNCH)
+        End If
         n = n & ";" & NodeRow(13, dx1, DIM_FOUND_T / 2 + DIM_WALL_H)
         n = n & ";" & NodeRow(14, dx2, DIM_FOUND_T / 2 + DIM_WALL_H)
         n = n & ";" & NodeRow(15, dx1, dz2)
         n = n & ";" & NodeRow(16, dx1 + DIM_WALL_T / 2, dz2)
-        n = n & ";" & NodeRow(17, dx1 + DIM_WALL_T / 2 + DIM_WALL_HAUNCH, dz2)
-        n = n & ";" & NodeRow(18, dx1 + DIM_WALL_T / 2 + DIM_SPAN - DIM_WALL_HAUNCH, dz2)
+        If DIM_WALL_HAUNCH > 0 Then
+            n = n & ";" & NodeRow(17, dx1 + DIM_WALL_T / 2 + DIM_WALL_HAUNCH, dz2)
+            n = n & ";" & NodeRow(18, dx1 + DIM_WALL_T / 2 + DIM_SPAN - DIM_WALL_HAUNCH, dz2)
+        End If
         n = n & ";" & NodeRow(19, dx1 + DIM_WALL_T / 2 + DIM_SPAN, dz2)
         n = n & ";" & NodeRow(20, dx1 + DIM_WALL_T + DIM_SPAN, dz2)
 
@@ -703,16 +733,18 @@ Private Sub GenerateGeometry()
         e = e & ";" & ElemRow(5, sRigidFound, 5, 6, 0)
         e = e & ";" & ElemRow(8, 8, 9, 3, -180)
         e = e & ";" & ElemRow(9, 8, 10, 6, 0)
-        e = e & ";" & ElemRow(10, 2, 11, 9, -180)
-        e = e & ";" & ElemRow(11, 2, 12, 10, 0)
-        e = e & ";" & ElemRow(12, sHaunchWall, 13, 11, -180)
-        e = e & ";" & ElemRow(13, sHaunchWall, 14, 12, 0)
+        e = e & ";" & ElemRow(10, 2, nWallTopL, 9, -180)
+        e = e & ";" & ElemRow(11, 2, nWallTopR, 10, 0)
+        If DIM_SLAB_HAUNCH > 0 Then
+            e = e & ";" & ElemRow(12, sHaunchWall, 13, 11, -180)
+            e = e & ";" & ElemRow(13, sHaunchWall, 14, 12, 0)
+        End If
         e = e & ";" & ElemRow(14, 8, 15, 13, -180)
         e = e & ";" & ElemRow(15, 8, 20, 14, 0)
         e = e & ";" & ElemRow(16, 7, 15, 16, 0)
-        e = e & ";" & ElemRow(17, sHaunchSlab, 16, 17, 0)
-        e = e & ";" & ElemRow(18, 1, 17, 18, 0)
-        e = e & ";" & ElemRow(19, sHaunchSlab, 18, 19, 0)
+        If DIM_WALL_HAUNCH > 0 Then e = e & ";" & ElemRow(17, sHaunchSlab, 16, 17, 0)
+        e = e & ";" & ElemRow(18, 1, nSlabL, nSlabR, 0)
+        If DIM_WALL_HAUNCH > 0 Then e = e & ";" & ElemRow(19, sHaunchSlab, 18, 19, 0)
         e = e & ";" & ElemRow(20, 7, 19, 20, 0)
 
     End If
@@ -744,6 +776,14 @@ End Sub
 Private Sub EhBlock(ByVal pTop As Double, ByVal pBot As Double, ByRef o() As Double)
 
     Dim l As Double
+    Dim i As Long
+
+    If pTop = pBot Then
+        For i = 1 To 8
+            o(i) = pBot
+        Next i
+        Exit Sub
+    End If
 
     l = ((-DIM_SLAB_T / 2 - DIM_FOUND_T / 2 - DIM_WALL_H) * pBot) / (pTop - pBot)
 
@@ -866,6 +906,10 @@ End Sub
 Private Sub AddLoad(ByVal elemNo As Long, ByVal lcname As String, ByVal cmd As String, _
                     ByVal loadDir As String, ByVal p1 As Double, ByVal p2 As Double)
 
+    ' A haunch member left out by GenerateGeometry (no haunch) carries
+    ' nothing; its neighbours already span the whole height/length.
+    If Not ElementExists(elemNo) Then Exit Sub
+
     If Len(BEAMLOAD_LIST) > 0 Then BEAMLOAD_LIST = BEAMLOAD_LIST & ";"
 
     BEAMLOAD_LIST = BEAMLOAD_LIST & elemNo & "|" & lcname & "|" & cmd & "|" & loadDir & _
@@ -873,6 +917,10 @@ Private Sub AddLoad(ByVal elemNo As Long, ByVal lcname As String, ByVal cmd As S
                     "|" & JsonNum(Round(p2, LOAD_ROUND_DP))
 
 End Sub
+
+Private Function ElementExists(ByVal elemNo As Long) As Boolean
+    ElementExists = (InStr(1, ";" & ELEM_LIST, ";" & elemNo & "|", vbBinaryCompare) > 0)
+End Function
 
 Private Sub GenerateLoadCombinations()
 
@@ -1182,232 +1230,226 @@ Private Function IsDivideTarget(ByVal elemNo As Long) As Boolean
     IsDivideTarget = (InStr(1, "," & DIVIDE_TARGETS & ",", "," & elemNo & ",", vbBinaryCompare) > 0)
 End Function
 
-Private Function FrameLength(ByVal fr As Long) As Double
-    FrameLength = Sqr((JT_X(FR_J(fr)) - JT_X(FR_I(fr))) ^ 2 + _
-                      (JT_Z(FR_J(fr)) - JT_Z(FR_I(fr))) ^ 2)
-End Function
 
 
 ' ===========================================================================
-'  MODEL TEXT
-'  Tables in the order SAP2000's own export uses (see the reference file).
-'  Each table is its header, its rows, then a line holding one space.
+'  BUILD SCRIPT
+'  One checked SAP2000 API call per object, in dependency order: material,
+'  sections, joints, frames, springs, load patterns, loads, combinations,
+'  DOF, project information - then save, analyse, show. The values are the
+'  ones the .$2k writer used to write (and that the owner's reference model
+'  matched), so the model is the same; only the way it reaches SAP changed.
 ' ===========================================================================
 
-Private Function WriteModelText() As String
+Private Function WriteBuildScript(ByVal sdbPath As String, ByVal resultPath As String) As String
 
     Dim res As String
 
     OUT_COUNT = 0
-    ReDim OUT_LINES(1 To 512)
-    TEXT_WARNINGS = ""
+    ReDim OUT_LINES(1 To 1024)
     LOAD_COUNT = 0
     SPRING_COUNT = 0
 
-    Call Emit("File " & SapOutputPath() & " was saved on " & Month(Now) & "." & Day(Now) & _
-              "." & Format$(Year(Now) Mod 100, "00") & " at " & Format$(Now, "hh:mm:ss"))
-    Call Emit(" ")
+    res = ValidateSections()
+    If Len(res) > 0 Then WriteBuildScript = res: Exit Function
 
-    ' XZ plane frame, as MIDAS's STYP X-Z: springs at z = 0 then leave no
-    ' mechanism (with all six DOF the frame could spin about global X).
-    Call TableStart("ACTIVE DEGREES OF FREEDOM")
-    Call Emit("   UX=Yes   UY=No   UZ=Yes   RX=No   RY=Yes   RZ=No")
-    Call TableEnd
+    Call EmitSapPreamble(resultPath)
 
-    Call TableStart("ANALYSIS OPTIONS")
-    Call Emit("   Solver=Advanced   SolverProc=Auto   Force32Bit=No   StiffCase=None   GeomMod=None")
-    Call TableEnd
+    ' Helpers for this model. Every add compares the name SAP2000 hands back
+    ' with the one asked for - a clash is renamed silently otherwise.
+    Call Emit("  function SapPt($nm, $x, $z) { $n = ''; SapChk ""Joint $nm"" ($m.PointObj.AddCartesian([double]$x, 0.0, [double]$z, [ref]$n, $nm, 'Global', $true, 0)); SapNamed ""Joint $nm"" $nm $n }")
+    Call Emit("  function SapFr($nm, $i, $j, $sec, $ang) { $n = ''; SapChk ""Frame $nm"" ($m.FrameObj.AddByPoint($i, $j, [ref]$n, $sec, $nm)); SapNamed ""Frame $nm"" $nm $n; if ($ang -ne 0) { SapChk ""Frame $nm local axes"" ($m.FrameObj.SetLocalAxes($nm, [double]$ang, 0)) }; SapChk ""Frame $nm output stations"" ($m.FrameObj.SetOutputStations($nm, 1, 0.5, 2, $false, $false, 0)) }")
+    Call Emit("  function SapSpr($nm, $kh, $kv) { $k = [double[]]($kh, $kh, $kv, 0, 0, 0); SapChk ""Spring on joint $nm"" ($m.PointObj.SetSpring($nm, [ref]$k, 0, $true, $true)) }")
+    Call Emit("  function SapLd($fr, $pat, $dir, $a, $b) { $cs = 'Local'; if ($dir -eq 10) { $cs = 'Global' }; SapChk ""Load $pat on frame $fr"" ($m.FrameObj.SetLoadDistributed($fr, $pat, 1, $dir, 0.0, 1.0, [double]$a, [double]$b, $cs, $true, $false, 0)) }")
+    Call Emit("  function SapGr($fr, $pat, $gx) { SapChk ""Self-weight $pat on frame $fr"" ($m.FrameObj.SetLoadGravity($fr, $pat, [double]$gx, 0.0, 0.0, $false, 'Global', 0)) }")
+    Call Emit("  function SapPat($nm, $type, $sw) { SapChk ""Load pattern $nm"" ($m.LoadPatterns.Add($nm, $type, [double]$sw, $true)) }")
+    Call Emit("  function SapCmb($nm, $type) { SapChk ""Combination $nm"" ($m.RespCombo.Add($nm, $type)) }")
+    Call Emit("  function SapCmbAdd($nm, $ct, $case, $sf) { $t = $ct; SapChk ""Combination $nm + $case"" ($m.RespCombo.SetCaseList($nm, [ref]$t, $case, [double]$sf)) }")
 
-    Call TableStart("CASE - MODAL 1 - GENERAL")
-    Call Emit("   Case=MODAL   ModeType=Eigen   MaxNumModes=12   MinNumModes=1   EigenShift=0" & _
-              "   EigenCutoff=0   EigenTol=1E-09   AutoShift=Yes")
-    Call TableEnd
+    Call EmitMaterial
+    Call EmitSections
+    Call EmitJointsAndFrames
 
-    Call WriteStaticCaseTable
+    res = EmitSprings()
+    If Len(res) > 0 Then WriteBuildScript = res: Exit Function
 
-    res = WriteCombinationTable()
-    If Len(res) > 0 Then WriteModelText = res: Exit Function
+    Call EmitLoadPatterns
 
-    Call WriteConnectivityTable
+    res = EmitDistributedLoads()
+    If Len(res) > 0 Then WriteBuildScript = res: Exit Function
+    Call EmitSeismicSelfWeight
 
-    Call TableStart("COORDINATE SYSTEMS")
-    Call Emit("   Name=GLOBAL   Type=Cartesian   X=0   Y=0   Z=0   AboutZ=0   AboutY=0   AboutX=0")
-    Call TableEnd
+    res = EmitCombinations()
+    If Len(res) > 0 Then WriteBuildScript = res: Exit Function
 
-    Call TableStart("DATABASE FORMAT TYPES")
-    Call Emit("   UnitsCurr=Yes   OverrideE=No")
-    Call TableEnd
+    ' XZ plane frame (MIDAS STYP X-Z): springs at z = 0 then leave no
+    ' mechanism - with all six DOF the frame could spin about global X.
+    Call Emit("  $dof = [bool[]]($true, $false, $true, $false, $true, $false)")
+    Call Emit("  SapChk 'Active DOF' ($m.Analyze.SetActiveDOF([ref]$dof))")
 
-    Call WritePerFrameTable("FRAME AUTO MESH ASSIGNMENTS", _
-        "   AutoMesh=Yes   AtJoints=Yes   AtFrames=No   NumSegments=0   MaxLength=0   MaxDegrees=0")
-    Call WritePerFrameTable("FRAME DESIGN PROCEDURES", "   DesignProc=""From Material""")
-
-    res = WriteDistributedLoadTable()
-    If Len(res) > 0 Then WriteModelText = res: Exit Function
-    Call WriteGravityLoadTable
-
-    Call WritePerFrameTable("FRAME LOAD TRANSFER OPTIONS", "   Transfer=Yes")
-    Call WriteLocalAxesTable
-    Call WritePerFrameTable("FRAME OUTPUT STATION ASSIGNMENTS", _
-        "   StationType=MaxStaSpcg   MaxStaSpcg=0.5   AddAtElmInt=Yes   AddAtPtLoad=Yes")
-
-    res = WriteSectionTables()
-    If Len(res) > 0 Then WriteModelText = res: Exit Function
-
-    Call TableStart("GROUPS 1 - DEFINITIONS")
-    Call Emit("   GroupName=ALL   Selection=Yes   SectionCut=Yes   Steel=Yes   Concrete=Yes" & _
-              "   Aluminum=Yes   ColdFormed=Yes   Stage=Yes   Bridge=Yes   AutoSeismic=No" & _
-              "   AutoWind=No   SelDesSteel=No   SelDesAlum=No   SelDesCold=No   MassWeight=Yes   Color=Red")
-    Call TableEnd
-
-    Call WriteJointTable
-
-    res = WriteSpringTable()
-    If Len(res) > 0 Then WriteModelText = res: Exit Function
-
-    Call WriteLoadCaseTables
-    Call WriteMaterialTables
-
-    Call TableStart("PREFERENCES - DIMENSIONAL")
-    Call Emit("   MergeTol=0.001   FineGrid=0.25   Nudge=0.25   SelectTol=3   SnapTol=12" & _
-              "   SLineThick=2   PLineThick=4   MaxFont=8   MinFont=3   AutoZoom=10" & _
-              "   ShrinkFact=70   TextFileLen=240")
-    Call TableEnd
-
-    Call TableStart("PROGRAM CONTROL")
-    Call Emit("   ProgramName=SAP2000   Version=" & SAP_PROGRAM_VERSION & _
-              "   CurrUnits=""KN, m, C""   SteelCode=""AISC 360-10""   ConcCode=""ACI 318-14""" & _
-              "   AlumCode=""AA-ASD 2000""   ColdCode=AISI-ASD96   RegenHinge=Yes")
-    Call TableEnd
-
-    Call WriteProjectInfoTable
-    Call WriteRebarSizeTable
-
-    Call Emit("END TABLE DATA")
-
-    If Len(TEXT_WARNINGS) > 0 Then WriteModelText = "WARN:" & TEXT_WARNINGS
+    Call EmitProjectInfo
+    Call Emit("  SapCount 'joints' $m.PointObj " & JT_COUNT)
+    Call Emit("  SapCount 'frames' $m.FrameObj " & FR_COUNT)
+    Call Emit("  SapLog 'OK|Model built'")
+    Call EmitSapFinish(sdbPath)
 
 End Function
 
-' One row per load pattern (the MIDAS static load cases, less EQ/ATA when
-' the seismic gate is off).
-Private Sub WriteStaticCaseTable()
+' C30/37: Ec (MIDAS_INPUT!B43, else 33 GPa), unit weight (INPUT!B5), fc -
+' the values the .$2k's material tables carried. SAP derives G and the mass.
+Private Sub EmitMaterial()
+
+    Dim nm As String
+    nm = PsQ(MATERIAL_NAME)
+
+    Call Emit("  SapChk 'Material' ($m.PropMaterial.SetMaterial(" & nm & ", 2, -1, '', ''))")
+    Call Emit("  SapChk 'Material E, nu, alpha' ($m.PropMaterial.SetMPIsotropic(" & nm & ", " & _
+              SapNum(MATERIAL_ELAST) & ", " & SapNum(MATERIAL_POISN) & ", " & SapNum(MATERIAL_THERMAL) & ", 0))")
+    Call Emit("  SapChk 'Material unit weight' ($m.PropMaterial.SetWeightAndMass(" & nm & ", 1, " & _
+              SapNum(MATERIAL_DEN) & ", 0))")
+    Call Emit("  SapChk 'Material fc' ($m.PropMaterial.SetOConcrete_1(" & nm & ", " & SapNum(MATERIAL_FC) & _
+              ", $false, 1, 2, 2, 0.00181818, 0.005, -0.1, 0, 0, 0))")
+
+End Sub
+
+' Every section is a solid rectangle depth x 1.0 m (the per-metre strip).
+Private Sub EmitSections()
 
     Dim rows() As String
     Dim f() As String
     Dim i As Long
 
-    Call TableStart("CASE - STATIC 1 - LOAD ASSIGNMENTS")
+    rows = Split(SECT_LIST, ";")
+    For i = 0 To UBound(rows)
+        f = Split(rows(i), "|")
+        Call Emit("  SapChk " & PsQ("Section " & SectionNameOf(CLng(f(0)))) & " ($m.PropFrame.SetRectangle(" & _
+                  PsQ(SectionNameOf(CLng(f(0)))) & ", " & PsQ(MATERIAL_NAME) & ", " & SapNum(Val(f(2))) & ", " & _
+                  SapNum(SECTION_WIDTH) & ", " & SectionColorOf(CLng(f(0))) & ", '', ''))")
+    Next i
+
+End Sub
+
+' Joints 1..JT_COUNT and frames 1..FR_COUNT exactly as ExpandModel numbered
+' them. MIDAS beta -180 (left wall) is SAP's 180; 0 is left alone.
+Private Sub EmitJointsAndFrames()
+
+    Dim jt As Long, fr As Long
+    Dim a As Double
+
+    For jt = 1 To JT_COUNT
+        Call Emit("  SapPt '" & jt & "' " & PsNum(JT_X(jt)) & " " & PsNum(JT_Z(jt)))
+    Next jt
+
+    For fr = 1 To FR_COUNT
+        a = FR_ANGLE(fr)
+        Do While a > 180: a = a - 360: Loop
+        Do While a <= -180: a = a + 360: Loop
+        Call Emit("  SapFr '" & fr & "' '" & FR_I(fr) & "' '" & FR_J(fr) & "' " & _
+                  PsQ(SectionNameOf(FR_SECT(fr))) & " " & PsNum(a))
+    Next fr
+
+End Sub
+
+' The MIDAS builder's db/NSPR rule on every joint at z = 0, sorted by X:
+'   interior   L = (x[i+1] - x[i-1]) / 2
+'   end        L = (x[2] - x[1]) / 2, plus half a wall thickness when the
+'              foundation stops at the wall centreline (no extension)
+'   Kz = ks * L,  Kx = Ky = Kz / 2
+' The reference model's springs follow exactly this rule.
+Private Function EmitSprings() As String
+
+    Dim ids() As Long
+    Dim xs() As Double
+    Dim n As Long, jt As Long
+    Dim i As Long, j As Long
+    Dim tmpId As Long, tmpX As Double
+    Dim ltrib As Double, kz As Double
+
+    ReDim ids(1 To JT_COUNT)
+    ReDim xs(1 To JT_COUNT)
+    For jt = 1 To JT_COUNT
+        If Abs(JT_Z(jt)) < FOUNDATION_Z_TOL Then
+            n = n + 1
+            ids(n) = jt
+            xs(n) = JT_X(jt)
+        End If
+    Next jt
+
+    If n < 2 Then
+        EmitSprings = "found " & n & " foundation joints at z = 0 (expected at least 2)."
+        Exit Function
+    End If
+
+    For i = 1 To n - 1
+        For j = i + 1 To n
+            If xs(j) < xs(i) Then
+                tmpX = xs(i): xs(i) = xs(j): xs(j) = tmpX
+                tmpId = ids(i): ids(i) = ids(j): ids(j) = tmpId
+            End If
+        Next j
+    Next i
+
+    For i = 1 To n
+        If i = 1 Then
+            ltrib = (xs(2) - xs(1)) / 2
+            If Not HAS_EXT Then ltrib = ltrib + DIM_WALL_T / 2
+        ElseIf i = n Then
+            ltrib = (xs(n) - xs(n - 1)) / 2
+            If Not HAS_EXT Then ltrib = ltrib + DIM_WALL_T / 2
+        Else
+            ltrib = (xs(i + 1) - xs(i - 1)) / 2
+        End If
+        kz = SPRING_KZ_MODULUS * ltrib
+        Call Emit("  SapSpr '" & ids(i) & "' " & PsNum(kz / 2) & " " & PsNum(kz))
+    Next i
+
+    SPRING_COUNT = n
+
+End Function
+
+' One pattern (and its linear static case) per MIDAS static case, less
+' EQ/ATA when the seismic gate is off; DL alone carries self-weight. The
+' blank model's own DEAD pattern and case go once DL exists.
+Private Sub EmitLoadPatterns()
+
+    Dim rows() As String
+    Dim f() As String
+    Dim i As Long
+
     rows = Split(STLDCASE_LIST, ";")
     For i = 0 To UBound(rows)
         f = Split(rows(i), "|")
         If SEISMIC_ACTIVE Or Not IsSeismicCase(f(0)) Then
-            Call Emit("   Case=" & SapName(f(0)) & "   LoadType=""Load pattern""   LoadName=" & _
-                      SapName(f(0)) & "   LoadSF=1")
+            Call Emit("  SapPat " & PsQ(SapName(f(0))) & " " & SapPatternTypeCode(SapDesignType(f(0), f(1))) & _
+                      " " & IIf(f(0) = "DL", "1", "0"))
         End If
     Next i
-    Call TableEnd
-
-End Sub
-
-' "ST" entries name a load pattern (SapName drops the "_"); "CB" entries name
-' another combination, kept as MIDAS spells it. LOADCOMB_LIST is already in
-' dependency order (ENV_* after the combinations they envelope).
-Private Function WriteCombinationTable() As String
-
-    Dim rows() As String
-    Dim f() As String
-    Dim items() As String
-    Dim it() As String
-    Dim i As Long, j As Long
-    Dim caseName As String
-    Dim s As String
-
-    If Len(LOADCOMB_LIST) = 0 Then
-        WriteCombinationTable = "no load combinations were generated."
-        Exit Function
-    End If
-
-    Call TableStart("COMBINATION DEFINITIONS")
-    rows = Split(LOADCOMB_LIST, ";")
-    For i = 0 To UBound(rows)
-        f = Split(rows(i), "|")
-        items = Split(f(3), ",")
-        For j = 0 To UBound(items)
-            it = Split(items(j), ":")
-            If it(0) = "ST" Then
-                caseName = SapName(it(1))
-            ElseIf it(0) = "CB" Then
-                caseName = it(1)
-            Else
-                WriteCombinationTable = f(0) & ": unknown reference type """ & it(0) & """."
-                Exit Function
-            End If
-            s = "   ComboName=" & SapQuote(f(0))
-            If j = 0 Then
-                s = s & "   ComboType=" & IIf(f(2) = "1", "Envelope", """Linear Add""") & _
-                    "   AutoDesign=No"
-            End If
-            s = s & "   CaseName=" & SapQuote(caseName) & "   ScaleFactor=" & it(2)
-            If j = 0 Then
-                s = s & "   SteelDesign=None   ConcDesign=None   AlumDesign=None   ColdDesign=None"
-            End If
-            Call Emit(s)
-        Next j
-    Next i
-    Call TableEnd
-
-End Function
-
-Private Sub WriteConnectivityTable()
-
-    Dim fr As Long
-
-    Call TableStart("CONNECTIVITY - FRAME")
-    For fr = 1 To FR_COUNT
-        Call Emit("   Frame=" & fr & "   JointI=" & FR_I(fr) & "   JointJ=" & FR_J(fr) & "   IsCurved=No")
-    Next fr
-    Call TableEnd
-
-End Sub
-
-' The same fields on every frame.
-Private Sub WritePerFrameTable(ByVal tableName As String, ByVal fields As String)
-
-    Dim fr As Long
-
-    Call TableStart(tableName)
-    For fr = 1 To FR_COUNT
-        Call Emit("   Frame=" & fr & fields)
-    Next fr
-    Call TableEnd
+    Call Emit("  SapChk 'Remove the default DEAD case' ($m.LoadCases.Delete('DEAD'))")
+    Call Emit("  SapChk 'Remove the default DEAD pattern' ($m.LoadPatterns.Delete('DEAD'))")
 
 End Sub
 
 ' BEAMLOAD_LIST rows are "elem|case|cmd|dir|p1|p2", p1 at the element's I
 ' end and p2 at its J end over the full length (MIDAS D = [0,1]). A divided
 ' element's pieces each get their slice of that trapezoid.
-'   GZ (global Z, MIDAS writes -v)  ->  CoordSys=GLOBAL  Dir=Gravity  +v
-'   LZ (member local z)             ->  CoordSys=Local   Dir=2        same sign
-' The LZ mapping is the reference file's: its walls run top-down like the
-' MIDAS ones, the left wall with Angle=180, and carry the MIDAS values
-' unchanged in Dir=2.
-Private Function WriteDistributedLoadTable() As String
+'   GZ (global Z, MIDAS writes -v)  ->  gravity (dir 10), +v
+'   LZ (member local z)             ->  local 2 (dir 2), same sign
+' The LZ mapping is the reference model's: its walls run top-down like the
+' MIDAS ones, the left wall at 180 degrees, carrying the MIDAS values.
+Private Function EmitDistributedLoads() As String
 
     Dim rows() As String
     Dim f() As String
     Dim i As Long, k As Long
-    Dim elemNo As Long, pieces As Long, fr As Long
-    Dim p1 As Double, p2 As Double, va As Double, vb As Double
-    Dim loadSign As Double
-    Dim coordSys As String, loadDir As String
+    Dim elemNo As Long, pieces As Long
+    Dim p1 As Double, p2 As Double
+    Dim loadSign As Double, loadDir As Long
 
     If Len(BEAMLOAD_LIST) = 0 Then
-        WriteDistributedLoadTable = "no beam loads were generated."
+        EmitDistributedLoads = "no beam loads were generated."
         Exit Function
     End If
 
-    Call TableStart("FRAME LOADS - DISTRIBUTED")
     rows = Split(BEAMLOAD_LIST, ";")
     For i = 0 To UBound(rows)
 
@@ -1415,105 +1457,122 @@ Private Function WriteDistributedLoadTable() As String
         elemNo = CLng(f(0))
 
         Select Case f(3)
-            Case "GZ": coordSys = "GLOBAL": loadDir = "Gravity": loadSign = -1
-            Case "LZ": coordSys = "Local": loadDir = "2": loadSign = 1
+            Case "GZ": loadDir = 10: loadSign = -1
+            Case "LZ": loadDir = 2: loadSign = 1
             Case Else
-                WriteDistributedLoadTable = "element " & elemNo & ", case " & f(1) & _
+                EmitDistributedLoads = "element " & elemNo & ", case " & f(1) & _
                     ": load direction """ & f(3) & """ has no SAP2000 mapping."
                 Exit Function
         End Select
 
         If elemNo > UBound(ELEM_PIECES) Then
-            WriteDistributedLoadTable = "a load names element " & elemNo & ", which does not exist."
+            EmitDistributedLoads = "a load names element " & elemNo & ", which does not exist."
             Exit Function
         End If
         pieces = ELEM_PIECES(elemNo)
         If pieces = 0 Then
-            WriteDistributedLoadTable = "a load names element " & elemNo & ", which does not exist."
+            EmitDistributedLoads = "a load names element " & elemNo & ", which does not exist."
             Exit Function
         End If
 
         p1 = Val(f(4))
         p2 = Val(f(5))
         For k = 0 To pieces - 1
-            fr = ELEM_FIRST_FRAME(elemNo) + k
-            va = loadSign * (p1 + (p2 - p1) * k / pieces)
-            vb = loadSign * (p1 + (p2 - p1) * (k + 1) / pieces)
-            Call Emit("   Frame=" & fr & "   LoadPat=" & SapName(f(1)) & "   CoordSys=" & coordSys & _
-                      "   Type=Force   Dir=" & loadDir & "   DistType=RelDist   RelDistA=0   RelDistB=1" & _
-                      "   AbsDistA=0   AbsDistB=" & SapNum(FrameLength(fr)) & _
-                      "   FOverLA=" & SapNum(Round(va, LOAD_ROUND_DP)) & _
-                      "   FOverLB=" & SapNum(Round(vb, LOAD_ROUND_DP)))
+            Call Emit("  SapLd '" & (ELEM_FIRST_FRAME(elemNo) + k) & "' " & PsQ(SapName(f(1))) & " " & loadDir & " " & _
+                      PsNum(Round(loadSign * (p1 + (p2 - p1) * k / pieces), LOAD_ROUND_DP)) & " " & _
+                      PsNum(Round(loadSign * (p1 + (p2 - p1) * (k + 1) / pieces), LOAD_ROUND_DP)))
             LOAD_COUNT = LOAD_COUNT + 1
         Next k
 
     Next i
-    Call TableEnd
 
 End Function
 
-' ATA: the MIDAS db/BODF record FV = [kh, 0, 0] - the self-weight applied
-' along global X. Seismic only, like the ATA pattern itself.
-Private Sub WriteGravityLoadTable()
+' ATA: the MIDAS db/BODF record FV = [kh, 0, 0] - self-weight along global
+' X. Seismic only, like the ATA pattern itself.
+Private Sub EmitSeismicSelfWeight()
 
     Dim fr As Long
 
     If Not SEISMIC_ACTIVE Then Exit Sub
-
-    Call TableStart("FRAME LOADS - GRAVITY")
     For fr = 1 To FR_COUNT
-        Call Emit("   Frame=" & fr & "   LoadPat=ATA   CoordSys=GLOBAL   MultiplierX=" & _
-                  SapNum(DIM_ATA_FACTOR) & "   MultiplierY=0   MultiplierZ=0")
+        Call Emit("  SapGr '" & fr & "' 'ATA' " & PsNum(DIM_ATA_FACTOR))
     Next fr
-    Call TableEnd
 
 End Sub
 
-' MIDAS beta -180 (left wall) is the same rotation as SAP's 180; angles are
-' normalised into (-180, 180] and 0 is left out, as SAP's export does.
-Private Sub WriteLocalAxesTable()
-
-    Dim fr As Long
-    Dim a As Double
-    Dim wrote As Boolean
-
-    For fr = 1 To FR_COUNT
-        a = FR_ANGLE(fr)
-        Do While a > 180: a = a - 360: Loop
-        Do While a <= -180: a = a + 360: Loop
-        If a <> 0 Then
-            If Not wrote Then Call TableStart("FRAME LOCAL AXES ASSIGNMENTS 1 - TYPICAL")
-            wrote = True
-            Call Emit("   Frame=" & fr & "   Angle=" & SapNum(a))
-        End If
-    Next fr
-    If wrote Then Call TableEnd
-
-End Sub
-
-' FRAME SECTION ASSIGNMENTS, 01 - GENERAL and 02 - CONCRETE COLUMN. Only
-' the sections in SECT_LIST are defined - the same set the MIDAS builder
-' writes, section 3 included when B6 > 0 although nothing uses it.
-Private Function WriteSectionTables() As String
+' "ST" entries name a load pattern's case (SapName drops the "_"), "CB"
+' another combination, spelled as in MIDAS. LOADCOMB_LIST is in dependency
+' order (ENV_* after the combinations they envelope).
+Private Function EmitCombinations() As String
 
     Dim rows() As String
     Dim f() As String
+    Dim items() As String
+    Dim it() As String
+    Dim i As Long, j As Long
+
+    If Len(LOADCOMB_LIST) = 0 Then
+        EmitCombinations = "no load combinations were generated."
+        Exit Function
+    End If
+
+    rows = Split(LOADCOMB_LIST, ";")
+    For i = 0 To UBound(rows)
+        f = Split(rows(i), "|")
+        Call Emit("  SapCmb " & PsQ(f(0)) & " " & IIf(f(2) = "1", "1", "0"))
+        items = Split(f(3), ",")
+        For j = 0 To UBound(items)
+            it = Split(items(j), ":")
+            If it(0) = "ST" Then
+                Call Emit("  SapCmbAdd " & PsQ(f(0)) & " 0 " & PsQ(SapName(it(1))) & " " & PsNum(Val(it(2))))
+            ElseIf it(0) = "CB" Then
+                Call Emit("  SapCmbAdd " & PsQ(f(0)) & " 1 " & PsQ(it(1)) & " " & PsNum(Val(it(2))))
+            Else
+                EmitCombinations = f(0) & ": unknown reference type """ & it(0) & """."
+                Exit Function
+            End If
+        Next j
+    Next i
+
+End Function
+
+' Company fixed; project name, engineer and revision from the INPUT sheet;
+' model name = the workbook; model description = this module and version
+' (the tests read it back from SAP2000's own .$2k export).
+Private Sub EmitProjectInfo()
+
+    Call EmitInfo("Company Name", PROJINFO_COMPANY)
+    Call EmitInfo("Project Name", PROJECT_NAME)
+    Call EmitInfo("Model Name", ThisWorkbook.Name)
+    Call EmitInfo("Model Description", SCRIPT_ID & " " & SCRIPT_VERSION)
+    Call EmitInfo("Revision Number", PROJECT_REVISION)
+    Call EmitInfo("Engineer", PROJECT_ENGINEER)
+
+End Sub
+
+Private Sub EmitInfo(ByVal item As String, ByVal value As String)
+    If Len(Trim$(value)) = 0 Then Exit Sub
+    Call Emit("  SapChk " & PsQ("Project information " & item) & " ($m.SetProjectInfo(" & PsQ(item) & ", " & _
+              PsQ(Trim$(value)) & "))")
+End Sub
+
+' Section names must be unique (two sharing one would silently merge) and
+' every frame's section must be defined.
+Private Function ValidateSections() As String
+
+    Dim rows() As String
     Dim i As Long, j As Long, fr As Long
     Dim nm As String, nm2 As String
-    Dim d As Double, b As Double
-    Dim a As Double, i33 As Double, i22 As Double, tors As Double
-    Dim longSide As Double, shortSide As Double
 
     rows = Split(SECT_LIST, ";")
-
-    ' Names must be unique - two sections sharing one would silently merge.
     For i = 0 To UBound(rows)
         nm = SectionNameOf(CLng(Split(rows(i), "|")(0)))
         For j = i + 1 To UBound(rows)
             nm2 = SectionNameOf(CLng(Split(rows(j), "|")(0)))
             If StrComp(nm, nm2, vbTextCompare) = 0 Then
-                WriteSectionTables = "two sections are both named """ & nm & """ - rename one in " & _
-                                     INPUT_SHEET_NAME & " column A."
+                ValidateSections = "two sections are both named """ & nm & """ - rename one in " & _
+                                   INPUT_SHEET_NAME & " column A."
                 Exit Function
             End If
         Next j
@@ -1521,57 +1580,10 @@ Private Function WriteSectionTables() As String
 
     For fr = 1 To FR_COUNT
         If Len(SectionNameOf(FR_SECT(fr))) = 0 Then
-            WriteSectionTables = "frame " & fr & " uses section " & FR_SECT(fr) & _
-                                 ", which was not defined."
+            ValidateSections = "frame " & fr & " uses section " & FR_SECT(fr) & ", which was not defined."
             Exit Function
         End If
     Next fr
-
-    Call TableStart("FRAME SECTION ASSIGNMENTS")
-    For fr = 1 To FR_COUNT
-        Call Emit("   Frame=" & fr & "   AutoSelect=N.A.   AnalSect=" & _
-                  SapQuote(SectionNameOf(FR_SECT(fr))) & "   MatProp=Default")
-    Next fr
-    Call TableEnd
-
-    ' Solid rectangle, depth d (t3) x width b (t2). The torsion constant is
-    ' the usual series approximation, which reproduces the reference file's
-    ' 0.0217931 for 0.45 x 1.0.
-    Call TableStart("FRAME SECTION PROPERTIES 01 - GENERAL")
-    b = SECTION_WIDTH
-    For i = 0 To UBound(rows)
-        f = Split(rows(i), "|")
-        d = Val(f(2))
-        a = b * d
-        i33 = b * d ^ 3 / 12
-        i22 = d * b ^ 3 / 12
-        longSide = IIf(b > d, b, d)
-        shortSide = IIf(b > d, d, b)
-        tors = longSide * shortSide ^ 3 * _
-               (1 / 3 - 0.21 * (shortSide / longSide) * (1 - shortSide ^ 4 / (12 * longSide ^ 4)))
-        Call Emit("   SectionName=" & SapQuote(SectionNameOf(CLng(f(0)))) & "   Material=" & MATERIAL_NAME & _
-                  "   Shape=Rectangular   t3=" & SapNum(d) & "   t2=" & SapNum(b) & _
-                  "   Area=" & SapNum(a) & "   TorsConst=" & SapNum(tors) & _
-                  "   I33=" & SapNum(i33) & "   I22=" & SapNum(i22) & "   I23=0" & _
-                  "   AS2=" & SapNum(a * 5 / 6) & "   AS3=" & SapNum(a * 5 / 6) & _
-                  "   S33=" & SapNum(b * d ^ 2 / 6) & "   S22=" & SapNum(d * b ^ 2 / 6) & " _")
-        Call Emit("        Z33=" & SapNum(b * d ^ 2 / 4) & "   Z22=" & SapNum(d * b ^ 2 / 4) & _
-                  "   R33=" & SapNum(Sqr(i33 / a)) & "   R22=" & SapNum(Sqr(i22 / a)) & _
-                  "   Color=" & SectionColorOf(CLng(f(0))) & "   FromFile=No   AMod=1   A2Mod=1" & _
-                  "   A3Mod=1   JMod=1   I2Mod=1   I3Mod=1   MMod=1   WMod=1")
-    Next i
-    Call TableEnd
-
-    ' Reinforcement layout as in the reference file (design, not check).
-    Call TableStart("FRAME SECTION PROPERTIES 02 - CONCRETE COLUMN")
-    For i = 0 To UBound(rows)
-        f = Split(rows(i), "|")
-        Call Emit("   SectionName=" & SapQuote(SectionNameOf(CLng(f(0)))) & _
-                  "   RebarMatL=A615Gr60   RebarMatC=A615Gr60   ReinfConfig=Rectangular" & _
-                  "   LatReinf=Ties   Cover=0.04   NumBars3Dir=3   NumBars2Dir=3   BarSizeL=#9" & _
-                  "   BarSizeC=#4   SpacingC=0.15   NumCBars2=3   NumCBars3=3   ReinfType=Design")
-    Next i
-    Call TableEnd
 
 End Function
 
@@ -1595,7 +1607,8 @@ Private Function SectionNameOf(ByVal sectNo As Long) As String
 
 End Function
 
-' SECTION_COLOR_LIST's RGB as the integer SAP2000 stores (R + 256 G + 65536 B).
+' SECTION_COLOR_LIST's RGB as the integer SAP2000 stores (R + 256 G + 65536
+' B); -1 (SAP's own choice) for a section without one.
 Private Function SectionColorOf(ByVal sectNo As Long) As String
 
     Dim entries() As String
@@ -1603,7 +1616,7 @@ Private Function SectionColorOf(ByVal sectNo As Long) As String
     Dim c() As String
     Dim i As Long
 
-    SectionColorOf = "Gray8Dark"
+    SectionColorOf = "-1"
     entries = Split(SECTION_COLOR_LIST, ";")
     For i = 0 To UBound(entries)
         f = Split(entries(i), "|")
@@ -1615,131 +1628,6 @@ Private Function SectionColorOf(ByVal sectNo As Long) As String
     Next i
 
 End Function
-
-Private Sub WriteJointTable()
-
-    Dim jt As Long
-
-    Call TableStart("JOINT COORDINATES")
-    For jt = 1 To JT_COUNT
-        Call Emit("   Joint=" & jt & "   CoordSys=GLOBAL   CoordType=Cartesian   XorR=" & _
-                  SapNum(JT_X(jt)) & "   Y=0   Z=" & SapNum(JT_Z(jt)) & _
-                  "   SpecialJt=" & IIf(JT_SPECIAL(jt), "Yes", "No"))
-    Next jt
-    Call TableEnd
-
-End Sub
-
-' The MIDAS builder's db/NSPR rule on every joint at z = 0, sorted by X:
-'   interior   L = (x[i+1] - x[i-1]) / 2
-'   end        L = (x[2] - x[1]) / 2, plus half a wall thickness when the
-'              foundation stops at the wall centreline (no extension)
-'   Kz = ks * L,  Kx = Ky = Kz / 2
-' The reference file's springs follow exactly this rule.
-Private Function WriteSpringTable() As String
-
-    Dim ids() As Long
-    Dim xs() As Double
-    Dim n As Long, jt As Long
-    Dim i As Long, j As Long
-    Dim tmpId As Long, tmpX As Double
-    Dim ltrib As Double, kz As Double
-
-    If SPRING_KZ_MODULUS <= 0 Then
-        TEXT_WARNINGS = TEXT_WARNINGS & " no springs - " & INPUT_SHEET_NAME & "!B42 subgrade " & _
-                        "modulus is " & SapNum(SPRING_KZ_MODULUS) & ", so the model has no supports."
-        Exit Function
-    End If
-
-    ReDim ids(1 To JT_COUNT)
-    ReDim xs(1 To JT_COUNT)
-    For jt = 1 To JT_COUNT
-        If Abs(JT_Z(jt)) < FOUNDATION_Z_TOL Then
-            n = n + 1
-            ids(n) = jt
-            xs(n) = JT_X(jt)
-        End If
-    Next jt
-
-    If n < 2 Then
-        WriteSpringTable = "found " & n & " foundation joints at z = 0 (expected at least 2)."
-        Exit Function
-    End If
-
-    For i = 1 To n - 1
-        For j = i + 1 To n
-            If xs(j) < xs(i) Then
-                tmpX = xs(i): xs(i) = xs(j): xs(j) = tmpX
-                tmpId = ids(i): ids(i) = ids(j): ids(j) = tmpId
-            End If
-        Next j
-    Next i
-
-    Call TableStart("JOINT SPRING ASSIGNMENTS 1 - UNCOUPLED")
-    For i = 1 To n
-        If i = 1 Then
-            ltrib = (xs(2) - xs(1)) / 2
-            If Not HAS_EXT Then ltrib = ltrib + DIM_WALL_T / 2
-        ElseIf i = n Then
-            ltrib = (xs(n) - xs(n - 1)) / 2
-            If Not HAS_EXT Then ltrib = ltrib + DIM_WALL_T / 2
-        Else
-            ltrib = (xs(i + 1) - xs(i - 1)) / 2
-        End If
-        kz = SPRING_KZ_MODULUS * ltrib
-        Call Emit("   Joint=" & ids(i) & "   CoordSys=Local   U1=" & SapNum(kz / 2) & _
-                  "   U2=" & SapNum(kz / 2) & "   U3=" & SapNum(kz) & "   R1=0   R2=0   R3=0")
-    Next i
-    Call TableEnd
-
-    SPRING_COUNT = n
-
-End Function
-
-' LOAD CASE DEFINITIONS (one linear static case per pattern, plus MODAL)
-' and LOAD PATTERN DEFINITIONS. DL alone carries self-weight.
-Private Sub WriteLoadCaseTables()
-
-    Dim rows() As String
-    Dim f() As String
-    Dim i As Long
-    Dim dt As String
-
-    rows = Split(STLDCASE_LIST, ";")
-
-    Call TableStart("LOAD CASE DEFINITIONS")
-    For i = 0 To UBound(rows)
-        f = Split(rows(i), "|")
-        If SEISMIC_ACTIVE Or Not IsSeismicCase(f(0)) Then
-            dt = SapDesignType(f(0), f(1))
-            Call Emit("   Case=" & SapName(f(0)) & "   Type=LinStatic   InitialCond=Zero" & _
-                      "   DesTypeOpt=""Prog Det""   DesignType=" & dt & _
-                      "   DesActOpt=""Prog Det""   DesignAct=" & SapDesignAct(dt) & _
-                      "   AutoType=None   RunCase=Yes")
-            If i = 0 Then
-                Call Emit("   Case=MODAL   Type=LinModal   InitialCond=Zero   DesTypeOpt=""Prog Det""" & _
-                          "   DesignType=OTHER   DesActOpt=""Prog Det""   DesignAct=Other" & _
-                          "   AutoType=None   RunCase=Yes")
-            End If
-        End If
-    Next i
-    Call TableEnd
-
-    Call TableStart("LOAD PATTERN DEFINITIONS")
-    For i = 0 To UBound(rows)
-        f = Split(rows(i), "|")
-        If SEISMIC_ACTIVE Or Not IsSeismicCase(f(0)) Then
-            Call Emit("   LoadPat=" & SapName(f(0)) & "   DesignType=" & SapDesignType(f(0), f(1)) & _
-                      "   SelfWtMult=" & IIf(f(0) = "DL", "1", "0"))
-        End If
-    Next i
-    Call TableEnd
-
-    Call TableStart("MASS SOURCE")
-    Call Emit("   MassSource=MSSSRC1   Elements=Yes   Masses=Yes   Loads=No   IsDefault=Yes")
-    Call TableEnd
-
-End Sub
 
 Private Function SapDesignType(ByVal caseName As String, ByVal midasType As String) As String
 
@@ -1764,143 +1652,291 @@ Private Function SapDesignType(ByVal caseName As String, ByVal midasType As Stri
 
 End Function
 
-Private Function SapDesignAct(ByVal designType As String) As String
+' SAP2000's eLoadPatternType for a design type name.
+Private Function SapPatternTypeCode(ByVal designType As String) As String
     Select Case designType
-        Case "DEAD": SapDesignAct = "Non-Composite"
-        Case "OTHER": SapDesignAct = "Other"
-        Case Else: SapDesignAct = """Short-Term Composite"""
+        Case "DEAD": SapPatternTypeCode = "1"
+        Case "LIVE": SapPatternTypeCode = "3"
+        Case "QUAKE": SapPatternTypeCode = "5"
+        Case Else: SapPatternTypeCode = "8"
     End Select
 End Function
 
-' C30/37 plus the A615Gr60 rebar the concrete-column sections reference.
-' Unit weight is INPUT!B5, Ec MIDAS_INPUT!B43 (see ReadInputs); G = E/2(1+v).
-Private Sub WriteMaterialTables()
 
-    Call TableStart("MATERIAL PROPERTIES 01 - GENERAL")
-    Call Emit("   Material=A615Gr60   Type=Rebar   SymType=Uniaxial   TempDepend=No   Color=Cyan")
-    Call Emit("   Material=" & MATERIAL_NAME & "   Type=Concrete   SymType=Isotropic   TempDepend=No   Color=Green")
-    Call TableEnd
+' ===========================================================================
+'  SAP2000 API BRIDGE - identical in both SAP2000 builders (drift-locked).
+'
+'  Excel is 64-bit; the SAP2000 17 API is a 32-bit .NET class that VBA
+'  cannot call. So the macro writes a PowerShell script, runs it hidden with
+'  Windows' own 32-bit PowerShell, and waits. The script starts its OWN
+'  SAP2000 (never one the user has open), builds or opens the model, saves
+'  the .sdb, runs the analysis, shows the window and exits - SAP2000 stays
+'  open. It reports one line per outcome in a log the macro reads back:
+'      OK|<step>      FAIL|<message>      DONE
+'  Every fact behind this (the 32-bit class, silent renaming, the UTF-8 BOM,
+'  the modal-dialog hang) is in CLAUDE.md, "SAP2000 audit ... and the API".
+' ===========================================================================
 
-    Call TableStart("MATERIAL PROPERTIES 02 - BASIC MECHANICAL PROPERTIES")
-    Call Emit("   Material=A615Gr60   UnitWeight=76.9728639422648   UnitMass=7.84904737995992" & _
-              "   E1=199947978.795958   A1=1.16999994421006E-05")
-    Call Emit("   Material=" & MATERIAL_NAME & "   UnitWeight=" & SapNum(MATERIAL_DEN) & _
-              "   UnitMass=" & SapNum(MATERIAL_DEN / GRAVITY_ACCEL) & _
-              "   E1=" & SapNum(MATERIAL_ELAST) & _
-              "   G12=" & SapNum(MATERIAL_ELAST / (2 * (1 + MATERIAL_POISN))) & _
-              "   U12=" & SapNum(MATERIAL_POISN) & "   A1=" & SapNum(MATERIAL_THERMAL))
-    Call TableEnd
+' <workbook folder>\SAP2000, created when missing; "" if the workbook has
+' never been saved. FileSystemObject, not Dir/MkDir, so a folder name with
+' characters outside the code page still works.
+Private Function SapFolder() As String
 
-    Call TableStart("MATERIAL PROPERTIES 03B - CONCRETE DATA")
-    Call Emit("   Material=" & MATERIAL_NAME & "   Fc=" & SapNum(MATERIAL_FC) & _
-              "   LtWtConc=No   SSCurveOpt=Mander   SSHysType=Takeda   SFc=0.00181818" & _
-              "   SCap=0.005   FinalSlope=-0.1   FAngle=0   DAngle=0")
-    Call TableEnd
+    Dim fso As Object
+    Dim p As String
 
-    Call TableStart("MATERIAL PROPERTIES 03E - REBAR DATA")
-    Call Emit("   Material=A615Gr60   Fy=413685.473370947   Fu=620528.21005642" & _
-              "   EffFy=455054.020708041   EffFu=682581.031062062   SSCurveOpt=Simple" & _
-              "   SSHysType=Kinematic   SHard=0.01   SCap=0.09   FinalSlope=-0.1   UseCTDef=No")
-    Call TableEnd
+    If Len(ThisWorkbook.Path) = 0 Then Exit Function
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    p = ThisWorkbook.Path & "\" & SAP_FOLDER_NAME
+    If Not fso.FolderExists(p) Then fso.CreateFolder p
+    SapFolder = p
 
-End Sub
-
-' Company fixed; project name, engineer and revision from the INPUT sheet
-' (ReadProjectName), model name = the workbook's name, model description =
-' this module's SCRIPT_ID and SCRIPT_VERSION.
-Private Sub WriteProjectInfoTable()
-
-    Call TableStart("PROJECT INFORMATION")
-    Call Emit("   Item=""Company Name""   Data=" & SapQuote(PROJINFO_COMPANY))
-    Call Emit("   Item=""Project Name""" & DataField(PROJECT_NAME))
-    Call Emit("   Item=""Model Name""" & DataField(ThisWorkbook.Name))
-    ' Which macro build wrote the file - tests/verify_sap2000_build.py reads it.
-    Call Emit("   Item=""Model Description""" & DataField(SCRIPT_ID & " " & SCRIPT_VERSION))
-    Call Emit("   Item=""Revision Number""" & DataField(PROJECT_REVISION))
-    Call Emit("   Item=Engineer" & DataField(PROJECT_ENGINEER))
-    Call TableEnd
-
-End Sub
-
-Private Function DataField(ByVal s As String) As String
-    If Len(Trim$(s)) > 0 Then DataField = "   Data=" & SapQuote(Trim$(s))
 End Function
 
-' Only the two sizes the concrete-column sections name; SAP2000 adds its
-' own standard list on import.
-Private Sub WriteRebarSizeTable()
+' <SAP2000 folder>\<workbook name without extension> - the stem of the
+' .sdb, the build script and its log.
+Private Function SapBasePath(ByVal folder As String) As String
 
-    Call TableStart("REBAR SIZES")
-    Call Emit("   RebarID=#4   Area=0.000129032001922727   Diameter=0.0127")
-    Call Emit("   RebarID=#9   Area=0.00064516   Diameter=0.0286512005329132")
-    Call TableEnd
+    Dim nm As String
+    Dim p As Long
+
+    nm = ThisWorkbook.Name
+    p = InStrRev(nm, ".")
+    If p > 1 Then nm = Left$(nm, p - 1)
+    SapBasePath = folder & "\" & nm
+
+End Function
+
+' A PowerShell single-quoted literal: nothing inside is interpreted, and a
+' single quote is written twice.
+Private Function PsQ(ByVal s As String) As String
+    PsQ = "'" & Replace(s, "'", "''") & "'"
+End Function
+
+' A number as a PowerShell argument: locale-invariant, in parentheses so a
+' leading minus can never read as a parameter name.
+Private Function PsNum(ByVal v As Double) As String
+    PsNum = "(" & SapNum(v) & ")"
+End Function
+
+Private Function PsBool(ByVal b As Boolean) As String
+    PsBool = IIf(b, "$true", "$false")
+End Function
+
+' The start of every build script: helpers, and a fresh hidden (or visible,
+' SAP_VISIBLE) SAP2000 with a blank kN-m model. Everything after it runs
+' inside the try block that EmitSapFinish closes.
+Private Sub EmitSapPreamble(ByVal resultPath As String)
+
+    Call Emit("# Written by " & SCRIPT_ID & " " & SCRIPT_VERSION & " - run by the macro with 32-bit PowerShell.")
+    Call Emit("# It starts its own SAP2000, builds the model, saves, analyses and leaves SAP2000 open.")
+    Call Emit("$ErrorActionPreference = 'Stop'")
+    Call Emit("$sapLog = " & PsQ(resultPath))
+    Call Emit("function SapLog($s) { Add-Content -LiteralPath $sapLog -Value $s -Encoding UTF8 }")
+    Call Emit("function SapChk($what, $ret) { if ($ret -ne 0) { throw ""$what failed (SAP2000 returned $ret)"" } }")
+    Call Emit("function SapNamed($what, $want, $got) { if ($got -ne $want) { throw ""$what came back named '$got', not '$want'"" } }")
+    Call Emit("function SapCount($what, $obj, $want) { $n = 0; $a = [string[]]@(); SapChk ""Count $what"" ($obj.GetNameList([ref]$n, [ref]$a)); if ($n -ne $want) { throw ""SAP2000 holds $n $what, the macro made $want"" } }")
+    Call Emit("$sap = $null")
+    Call Emit("try {")
+    Call Emit("  $sap = New-Object -ComObject CSI.SAP2000.API.SapObject")
+    Call Emit("  SapChk 'Start SAP2000' ($sap.ApplicationStart(6, " & PsBool(SAP_VISIBLE) & ", ''))")
+    Call Emit("  $m = $sap.SapModel")
+    Call Emit("  SapChk 'New model' ($m.InitializeNewModel(6))")
+    Call Emit("  SapChk 'Blank model' ($m.File.NewBlank())")
+    Call Emit("  SapChk 'Units kN, m, C' ($m.SetPresentUnits(6))")
+    Call Emit("  SapLog 'OK|SAP2000 started'")
 
 End Sub
 
+' Save, analyse, show, and close the try block. On any failure the script
+' closes its SAP2000 again, so nothing half-built is left behind.
+Private Sub EmitSapFinish(ByVal sdbPath As String)
 
-' ===========================================================================
-'  TEXT HELPERS
-' ===========================================================================
+    Call Emit("  SapChk 'Save' ($m.File.Save(" & PsQ(sdbPath) & "))")
+    Call Emit("  SapLog " & PsQ("OK|Saved " & sdbPath))
+    Call Emit("  SapChk 'Analysis' ($m.Analyze.RunAnalysis())")
+    Call Emit("  SapLog 'OK|Analysis run'")
+    Call Emit("  if (-not $sap.Visible()) { SapChk 'Show SAP2000' ($sap.Unhide()) }")
+    Call Emit("  SapLog 'DONE'")
+    Call Emit("} catch {")
+    Call Emit("  SapLog ('FAIL|' + $_.Exception.Message)")
+    Call Emit("  if ($sap) { try { [void]$sap.ApplicationExit($false) } catch { } }")
+    Call Emit("}")
 
-Private Sub TableStart(ByVal tableName As String)
-    Call Emit("TABLE:  """ & tableName & """")
 End Sub
 
-Private Sub TableEnd()
-    Call Emit(" ")
+' OUT_LINES as a UTF-8 file WITH a byte-order mark - Windows PowerShell 5.1
+' reads a file without one as ANSI and garbles every non-ASCII character.
+Private Function WriteScriptFile(ByVal path As String) As String
+
+    Dim st As Object
+    Dim lines() As String
+    Dim i As Long
+
+    On Error GoTo Failed
+
+    ReDim lines(1 To OUT_COUNT)
+    For i = 1 To OUT_COUNT
+        lines(i) = OUT_LINES(i)
+    Next i
+
+    Set st = CreateObject("ADODB.Stream")
+    st.Type = 2
+    st.Charset = "utf-8"
+    st.Open
+    st.WriteText Join(lines, vbCrLf) & vbCrLf
+    st.SaveToFile path, 2
+    st.Close
+    Exit Function
+
+Failed:
+    WriteScriptFile = "could not write " & path & " (" & Err.Description & ")."
+
+End Function
+
+Private Function ReadUtf8File(ByVal path As String) As String
+
+    Dim st As Object
+
+    On Error GoTo Failed
+    If Not CreateObject("Scripting.FileSystemObject").FileExists(path) Then Exit Function
+    Set st = CreateObject("ADODB.Stream")
+    st.Type = 2
+    st.Charset = "utf-8"
+    st.Open
+    st.LoadFromFile path
+    ReadUtf8File = st.ReadText
+    st.Close
+    Exit Function
+
+Failed:
+    ReadUtf8File = ""
+
+End Function
+
+' Runs the script in 32-bit PowerShell and waits for it (SAP_TIMEOUT_SEC at
+' most), keeping Excel responsive. Returns "" when the log ends in DONE,
+' otherwise the reason. On a timeout it ends the PowerShell process and the
+' SAP2000 it started - a hidden SAP2000 stuck on a dialog would otherwise
+' block forever - and nothing else.
+Private Function RunSapScript(ByVal scriptPath As String, ByVal resultPath As String) As String
+
+    Dim fso As Object, wmi As Object, startup As Object
+    Dim psExe As String, cmd As String
+    Dim pid As Variant
+    Dim rc As Long
+    Dim t0 As Single, waited As Single
+    Dim outcome As String
+    Dim p As Long, q As Long
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If fso.FileExists(resultPath) Then fso.DeleteFile resultPath, True
+
+    psExe = Environ$("WINDIR") & "\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
+    If Not fso.FileExists(psExe) Then psExe = Environ$("WINDIR") & "\System32\WindowsPowerShell\v1.0\powershell.exe"
+    cmd = """" & psExe & """ -NoProfile -NonInteractive -ExecutionPolicy Bypass -File """ & scriptPath & """"
+
+    Set wmi = GetObject("winmgmts:\\.\root\cimv2")
+    Set startup = wmi.Get("Win32_ProcessStartup").SpawnInstance_
+    startup.ShowWindow = 0
+    rc = wmi.Get("Win32_Process").Create(cmd, Null, startup, pid)
+    If rc <> 0 Then
+        RunSapScript = "could not start 32-bit PowerShell (" & psExe & ", WMI code " & rc & ")."
+        Exit Function
+    End If
+
+    t0 = Timer
+    Do
+        waited = SecondsSince(t0)
+        If wmi.ExecQuery("SELECT ProcessId FROM Win32_Process WHERE ProcessId = " & pid).Count = 0 Then Exit Do
+        If waited > SAP_TIMEOUT_SEC Then
+            Call EndSapScript(wmi, pid)
+            Application.StatusBar = False
+            RunSapScript = "SAP2000 did not finish within " & SAP_TIMEOUT_SEC & " s - most likely a " & _
+                           "SAP2000 dialog was waiting for an answer (an unstable or degenerate model does " & _
+                           "that). The script and its SAP2000 were closed. Last step reached: " & _
+                           LastOkStep(ReadUtf8File(resultPath))
+            Exit Function
+        End If
+        Application.StatusBar = "SAP2000: building and analysing the model - " & Int(waited) & " s"
+        Call PauseSeconds(0.5)
+    Loop
+    Application.StatusBar = False
+
+    outcome = ReadUtf8File(resultPath)
+    If InStr(1, outcome, "DONE", vbBinaryCompare) > 0 Then Exit Function
+
+    p = InStr(1, outcome, "FAIL|", vbBinaryCompare)
+    If p > 0 Then
+        q = InStr(p, outcome, vbCr)
+        If q = 0 Then q = Len(outcome) + 1
+        RunSapScript = Mid$(outcome, p + 5, q - p - 5)
+    Else
+        RunSapScript = "the SAP2000 script ended without reporting success. Last step reached: " & _
+                       LastOkStep(outcome) & ". Run " & scriptPath & " by hand in 32-bit PowerShell to see why."
+    End If
+
+End Function
+
+' Ends one PowerShell process and every SAP2000 it started.
+Private Sub EndSapScript(ByVal wmi As Object, ByVal pid As Variant)
+
+    Dim proc As Object
+
+    On Error Resume Next
+    For Each proc In wmi.ExecQuery("SELECT * FROM Win32_Process WHERE ParentProcessId = " & pid)
+        If LCase$(proc.Name) = "sap2000.exe" Then proc.Terminate
+    Next proc
+    For Each proc In wmi.ExecQuery("SELECT * FROM Win32_Process WHERE ProcessId = " & pid)
+        proc.Terminate
+    Next proc
+    On Error GoTo 0
+
 End Sub
+
+Private Function LastOkStep(ByVal outcome As String) As String
+
+    Dim p As Long, q As Long
+
+    p = InStrRev(outcome, "OK|")
+    If p = 0 Then
+        LastOkStep = "none (SAP2000 may not have started)"
+    Else
+        q = InStr(p, outcome, vbCr)
+        If q = 0 Then q = Len(outcome) + 1
+        LastOkStep = Mid$(outcome, p + 3, q - p - 3)
+    End If
+
+End Function
+
+' Seconds since t0, across midnight (Timer restarts at 0).
+Private Function SecondsSince(ByVal t0 As Single) As Single
+    SecondsSince = Timer - t0
+    If SecondsSince < 0 Then SecondsSince = SecondsSince + 86400
+End Function
+
+' DoEvents + Timer, not Application.Wait (whole seconds only, and it freezes
+' Excel).
+Private Sub PauseSeconds(ByVal secs As Single)
+    Dim t0 As Single
+    t0 = Timer
+    Do While SecondsSince(t0) < secs
+        DoEvents
+    Loop
+End Sub
+
+' MIDAS case names -> SAP pattern names: EHS2_L -> EHS2L.
+Private Function SapName(ByVal midasName As String) As String
+    SapName = Replace(midasName, "_", "")
+End Function
+
+' Locale-invariant number, rounded so float noise never reaches SAP2000.
+Private Function SapNum(ByVal v As Double) As String
+    SapNum = JsonNum(Round(v, 9))
+End Function
 
 Private Sub Emit(ByVal s As String)
     OUT_COUNT = OUT_COUNT + 1
     If OUT_COUNT > UBound(OUT_LINES) Then ReDim Preserve OUT_LINES(1 To UBound(OUT_LINES) * 2)
     OUT_LINES(OUT_COUNT) = s
 End Sub
-
-' MIDAS case names -> SAP pattern names: EHS2_L -> EHS2L, as the reference
-' file spells them. Combination names do not go through this.
-Private Function SapName(ByVal midasName As String) As String
-    SapName = Replace(midasName, "_", "")
-End Function
-
-' A value holding a space or "=" is quoted; a double quote inside it becomes
-' a single one, since the text format has no escape for it.
-Private Function SapQuote(ByVal s As String) As String
-    s = Replace(s, """", "'")
-    If Len(s) = 0 Or InStr(s, " ") > 0 Or InStr(s, "=") > 0 Then
-        SapQuote = """" & s & """"
-    Else
-        SapQuote = s
-    End If
-End Function
-
-' Locale-invariant number, rounded so float noise (0.30000000000000004)
-' never reaches the file.
-Private Function SapNum(ByVal v As Double) As String
-    SapNum = JsonNum(Round(v, 9))
-End Function
-
-' Written in one go at the end, so a failure while assembling never leaves
-' a half-written model behind. Print # uses the system code page, which is
-' what SAP2000 reads.
-Private Function WriteOutputFile(ByVal path As String) As String
-
-    Dim fileNo As Integer
-    Dim i As Long
-
-    On Error GoTo Failed
-
-    fileNo = FreeFile
-    Open path For Output As #fileNo
-    For i = 1 To OUT_COUNT
-        Print #fileNo, OUT_LINES(i)
-    Next i
-    Close #fileNo
-    Exit Function
-
-Failed:
-    WriteOutputFile = "could not write the file (" & Err.Description & ") - is it open " & _
-                      "in another program, or is the folder read-only?"
-    On Error Resume Next
-    Close #fileNo
-
-End Function
