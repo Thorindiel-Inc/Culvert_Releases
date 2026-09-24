@@ -49,10 +49,10 @@ Option Explicit
 ' ---------------------------------------------------------------------------
 
 ' Stamped into the report title and the file. Bump with every change.
-Private Const SCRIPT_VERSION As String = "2026-09-24c"
+Private Const SCRIPT_VERSION As String = "2026-09-24d"
 
 ' One line, no "_" continuation, no "|" - read by the updater's manifest.
-Private Const SCRIPT_CHANGELOG As String = "Writes the model to SAP2000\<workbook>.$2k and opens it in SAP2000 through the API: saves the .sdb, runs the analysis and leaves SAP2000 open with the solved model."
+Private Const SCRIPT_CHANGELOG As String = "No change to the model: the SAP2000 API bridge it shares with the culvert builder can now run steps after the analysis (used by the culvert results pull)."
 
 ' Identifies this module to the updater whatever it was named in Excel.
 Private Const SCRIPT_ID As String = "sap2000-wingwall-model-build"
@@ -1862,12 +1862,15 @@ End Sub
 
 ' Save, analyse, show, and close the try block. On any failure the script
 ' closes its SAP2000 again, so nothing half-built is left behind.
-Private Sub EmitSapFinish(ByVal sdbPath As String)
+' afterAnalysis: script lines run on the solved model before it is shown
+' (the culvert pulls its frame forces there); "" for none.
+Private Sub EmitSapFinish(ByVal sdbPath As String, Optional ByVal afterAnalysis As String = "")
 
     Call Emit("  SapChk 'Save' ($m.File.Save(" & PsQ(sdbPath) & "))")
     Call Emit("  SapLog " & PsQ("OK|Saved " & sdbPath))
     Call Emit("  SapChk 'Analysis' ($m.Analyze.RunAnalysis())")
     Call Emit("  SapLog 'OK|Analysis run'")
+    If Len(afterAnalysis) > 0 Then Call Emit(afterAnalysis)
     Call Emit("  if (-not $sap.Visible()) { SapChk 'Show SAP2000' ($sap.Unhide()) }")
     Call Emit("  SapLog 'DONE'")
     Call Emit("} catch {")

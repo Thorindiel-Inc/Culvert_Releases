@@ -6,8 +6,9 @@ Option Explicit
 '  Builds the culvert in SAP2000 object by object, saves it as
 '  <workbook folder>\SAP2000\<workbook name>.sdb, runs the analysis and
 '  leaves SAP2000 open with the solved model. It starts its OWN SAP2000 -
-'  one already open is never touched. No worksheet is changed; SAP_INPUT and
-'  SAP_RESULTS are not read or written. Results are not pulled back yet.
+'  one already open is never touched. The frame forces come back into
+'  SAP_RESULTS, laid out exactly as MIDAS_RESULTS (see RESULTS below);
+'  no other worksheet is changed and SAP_INPUT is not read.
 '
 '  HOW IT REACHES SAP2000: Excel is 64-bit and the SAP2000 17 API is 32-bit
 '  only, so the macro writes a PowerShell script (SAP2000\<name>_build.ps1,
@@ -29,8 +30,9 @@ Option Explicit
 '                     frames; each piece carries its share of a trapezoid
 '    db/NSPR          joint springs on every z = 0 joint, same tributary rule
 '    db/BODF          DL = self-weight multiplier 1; ATA = gravity along X
-'  Joints and frames are numbered 1..n in the MIDAS element order
-'  (foundation, walls, slab), division joints after the original ones.
+'  Joints and frames carry the numbers MIDAS gives them, division pieces
+'  included (see ExpandModel), so a frame in SAP2000, in SAP_RESULTS and in
+'  MIDAS_RESULTS is the same member under the same number.
 '
 '  Owner's decisions (2026-09-24), against the hand-built reference model
 '  old/SAP2000/3.00x3.00_Hd_3.0m.$2k:
@@ -57,10 +59,10 @@ Option Explicit
 ' ---------------------------------------------------------------------------
 
 ' Stamped into the report title. Bump with every change to this file.
-Private Const SCRIPT_VERSION As String = "2026-09-24c"
+Private Const SCRIPT_VERSION As String = "2026-09-24d"
 
 ' One line, no "_" continuation, no "|" - read by the updater's manifest.
-Private Const SCRIPT_CHANGELOG As String = "Builds the culvert in SAP2000 through its API (object by object) instead of writing a .$2k file: saves SAP2000\<workbook>.sdb, runs the analysis and leaves SAP2000 open with the solved model."
+Private Const SCRIPT_CHANGELOG As String = "Pulls the frame forces back into SAP_RESULTS in the MIDAS_RESULTS layout (same tables, formulas and element numbers); SAP2000 joints and frames now carry the MIDAS numbers."
 
 ' Identifies this module to the updater whatever it was named in Excel.
 Private Const SCRIPT_ID As String = "sap2000-culvert-model-build"
@@ -90,6 +92,19 @@ Private Const GRAVITY_ACCEL As Double = 9.80665
 
 ' Every section is a solid rectangle <depth> x 1.0 m, the per-metre strip.
 Private Const SECTION_WIDTH As Double = 1#
+
+' RESULTS - SAP_RESULTS becomes a copy of MIDAS_RESULTS (headers, summary
+' block, helper formulas, formats) whose two data tables hold SAP2000's
+' forces instead, row for row as the MIDAS builder writes them:
+'   table 1  B:J from row 3    every SLS-*, ULS-* and EQ-1 combination
+'   table 2  S:AA from row 36  ENV_SER/ENV_ALL max, then ENV_SER/ENV_ALL min
+' Combination outer, element ascending, then I[node], 2/4, J[node]; values
+' to 2 dp (MIDAS STYLES PLACE 2). MIDAS columns from SAP (measured against a
+' MIDAS build, same signs): Axial = P, Shear-y = V3, Shear-z = V2,
+' Torsion = T, Moment-y = M3, Moment-z = M2.
+Private Const RESULT_SHEET_NAME As String = "SAP_RESULTS"
+Private Const LAYOUT_SHEET_NAME As String = "MIDAS_RESULTS"
+Private Const FORCE_ROUND_DP As Long = 2
 
 ' Beam-load values are rounded to 3 dp, like the MIDAS builder's AddLoad.
 Private Const LOAD_ROUND_DP As Long = 3
@@ -207,11 +222,14 @@ Private Const STLDCASE_LIST As String = _
     "LSA2_L|LS;WA|FP;EQ|E;ATA|E"
 
 ' ---------------------------------------------------------------------------
-'  SAP MODEL - the divided, renumbered model ExpandModel builds.
-'  Joints 1..JT_COUNT, frames 1..FR_COUNT. ELEM_FIRST_FRAME/ELEM_PIECES
-'  map a MIDAS element number to its frames (indexed by element number).
+'  SAP MODEL - the divided model ExpandModel builds. Joints are indexed
+'  1..JT_COUNT and frames 1..FR_COUNT; JT_NAME/FR_NAME hold the MIDAS number
+'  each is created under in SAP2000. ELEM_FIRST_FRAME/ELEM_PIECES map a MIDAS
+'  element number to its frame indices (indexed by element number).
 ' ---------------------------------------------------------------------------
 Private JT_COUNT As Long
+Private JT_NAME() As Long
+Private FR_NAME() As Long
 Private JT_X() As Double
 Private JT_Z() As Double
 Private JT_SPECIAL() As Boolean
@@ -243,7 +261,7 @@ Private OUT_COUNT As Long
 Public Sub BuildSap2000Model()
 
     Dim report As String
-    Dim ok As Boolean
+    Dim ok As Boolean, built As Boolean
     Dim folder As String, stem As String
     Dim res As String
     Dim stage As String
@@ -301,16 +319,27 @@ Public Sub BuildSap2000Model()
 
     stage = "build script"
     If ok Then
-        res = WriteBuildScript(stem & ".sdb", stem & "_build.log")
+        res = WriteBuildScript(stem & ".sdb", stem & "_build.log", stem & "_forces.txt")
         If Len(res) = 0 Then res = WriteScriptFile(stem & "_build.ps1")
         ok = StepResult(report, "Build script", res)
     End If
 
+    ' Last run's forces must never be read as this run's.
     stage = "SAP2000"
-    If ok Then ok = StepResult(report, "SAP2000: build, save, analyse", _
-                               RunSapScript(stem & "_build.ps1", stem & "_build.log"))
-
     If ok Then
+        With CreateObject("Scripting.FileSystemObject")
+            If .FileExists(stem & "_forces.txt") Then .DeleteFile stem & "_forces.txt", True
+        End With
+        ok = StepResult(report, "SAP2000: build, save, analyse, frame forces", _
+                        RunSapScript(stem & "_build.ps1", stem & "_build.log"))
+    End If
+    built = ok
+
+    stage = "results"
+    If ok Then ok = StepResult(report, "Frame forces to " & RESULT_SHEET_NAME, _
+                               WriteSapResults(stem & "_forces.txt"))
+
+    If built Then
         report = report & String(40, "-") & vbCrLf & _
                  JT_COUNT & " joints, " & FR_COUNT & " frames (divided: " & DIVIDED_ELEMS & _
                  "), " & SPRING_COUNT & " springs, " & LOAD_COUNT & " frame loads, " & _
@@ -1138,6 +1167,9 @@ Private Function ExpandModel() As String
     Dim ni As Long, nj As Long
     Dim jPrev As Long, jNext As Long
     Dim t As Double
+    Dim tg() As String
+    Dim nextElem As Long, nextNode As Long
+    Dim pieceElem() As Long, pieceNode() As Long
 
     nodes = Split(NODE_LIST, ";")
     elems = Split(ELEM_LIST, ";")
@@ -1155,10 +1187,35 @@ Private Function ExpandModel() As String
     ReDim ELEM_FIRST_FRAME(0 To maxElem)
     ReDim ELEM_PIECES(0 To maxElem)
 
+    ' MIDAS numbering of the division (read off a real MIDAS build, K15 = 6:
+    ' 18 -> 18, 21-25; 10 -> 10, 26-30; 11 -> 11, 31-35; 4 -> 4, 36-40).
+    ' ope/DIVIDEELEM runs on the targets in DIVIDE_TARGETS order; each keeps
+    ' its own number for the piece at its I end, and its other pieces and new
+    ' nodes take the next free numbers, running from the I end to the J end.
+    ' pieceElem/pieceNode hold each target's first new number.
+    ReDim pieceElem(0 To maxElem)
+    ReDim pieceNode(0 To maxElem)
+    nextElem = maxElem + 1
+    nextNode = maxNode + 1
+    If DIVIDE_AMOUNT > 1 Then
+        tg = Split(DIVIDE_TARGETS, ",")
+        For i = 0 To UBound(tg)
+            elemNo = CLng(tg(i))
+            If ElementExists(elemNo) Then
+                pieceElem(elemNo) = nextElem
+                pieceNode(elemNo) = nextNode
+                nextElem = nextElem + DIVIDE_AMOUNT - 1
+                nextNode = nextNode + DIVIDE_AMOUNT - 1
+            End If
+        Next i
+    End If
+
     cap = (UBound(nodes) + 1) + (UBound(elems) + 1) * IIf(DIVIDE_AMOUNT > 1, DIVIDE_AMOUNT, 1)
+    ReDim JT_NAME(1 To cap)
     ReDim JT_X(1 To cap)
     ReDim JT_Z(1 To cap)
     ReDim JT_SPECIAL(1 To cap)
+    ReDim FR_NAME(1 To cap)
     ReDim FR_I(1 To cap)
     ReDim FR_J(1 To cap)
     ReDim FR_SECT(1 To cap)
@@ -1168,6 +1225,7 @@ Private Function ExpandModel() As String
     For i = 0 To UBound(nodes)
         f = Split(nodes(i), "|")
         JT_COUNT = JT_COUNT + 1
+        JT_NAME(JT_COUNT) = CLng(f(0))
         JT_X(JT_COUNT) = Val(f(1))
         JT_Z(JT_COUNT) = Val(f(3))
         JT_SPECIAL(JT_COUNT) = True
@@ -1203,12 +1261,14 @@ Private Function ExpandModel() As String
             Else
                 t = k / pieces
                 JT_COUNT = JT_COUNT + 1
+                JT_NAME(JT_COUNT) = pieceNode(elemNo) + k - 1
                 JT_X(JT_COUNT) = JT_X(ni) + (JT_X(nj) - JT_X(ni)) * t
                 JT_Z(JT_COUNT) = JT_Z(ni) + (JT_Z(nj) - JT_Z(ni)) * t
                 JT_SPECIAL(JT_COUNT) = False
                 jNext = JT_COUNT
             End If
             FR_COUNT = FR_COUNT + 1
+            FR_NAME(FR_COUNT) = IIf(k = 1, elemNo, pieceElem(elemNo) + k - 2)
             FR_I(FR_COUNT) = jPrev
             FR_J(FR_COUNT) = jNext
             FR_SECT(FR_COUNT) = CLng(f(1))
@@ -1241,7 +1301,8 @@ End Function
 '  matched), so the model is the same; only the way it reaches SAP changed.
 ' ===========================================================================
 
-Private Function WriteBuildScript(ByVal sdbPath As String, ByVal resultPath As String) As String
+Private Function WriteBuildScript(ByVal sdbPath As String, ByVal resultPath As String, _
+                                  ByVal forcesPath As String) As String
 
     Dim res As String
 
@@ -1258,7 +1319,7 @@ Private Function WriteBuildScript(ByVal sdbPath As String, ByVal resultPath As S
     ' Helpers for this model. Every add compares the name SAP2000 hands back
     ' with the one asked for - a clash is renamed silently otherwise.
     Call Emit("  function SapPt($nm, $x, $z) { $n = ''; SapChk ""Joint $nm"" ($m.PointObj.AddCartesian([double]$x, 0.0, [double]$z, [ref]$n, $nm, 'Global', $true, 0)); SapNamed ""Joint $nm"" $nm $n }")
-    Call Emit("  function SapFr($nm, $i, $j, $sec, $ang) { $n = ''; SapChk ""Frame $nm"" ($m.FrameObj.AddByPoint($i, $j, [ref]$n, $sec, $nm)); SapNamed ""Frame $nm"" $nm $n; if ($ang -ne 0) { SapChk ""Frame $nm local axes"" ($m.FrameObj.SetLocalAxes($nm, [double]$ang, 0)) }; SapChk ""Frame $nm output stations"" ($m.FrameObj.SetOutputStations($nm, 1, 0.5, 2, $false, $false, 0)) }")
+    Call Emit("  function SapFr($nm, $i, $j, $sec, $ang) { $n = ''; SapChk ""Frame $nm"" ($m.FrameObj.AddByPoint($i, $j, [ref]$n, $sec, $nm)); SapNamed ""Frame $nm"" $nm $n; if ($ang -ne 0) { SapChk ""Frame $nm local axes"" ($m.FrameObj.SetLocalAxes($nm, [double]$ang, 0)) }; SapChk ""Frame $nm output stations"" ($m.FrameObj.SetOutputStations($nm, 2, 0.0, 3, $false, $false, 0)) }")
     Call Emit("  function SapSpr($nm, $kh, $kv) { $k = [double[]]($kh, $kh, $kv, 0, 0, 0); SapChk ""Spring on joint $nm"" ($m.PointObj.SetSpring($nm, [ref]$k, 0, $true, $true)) }")
     Call Emit("  function SapLd($fr, $pat, $dir, $a, $b) { $cs = 'Local'; if ($dir -eq 10) { $cs = 'Global' }; SapChk ""Load $pat on frame $fr"" ($m.FrameObj.SetLoadDistributed($fr, $pat, 1, $dir, 0.0, 1.0, [double]$a, [double]$b, $cs, $true, $false, 0)) }")
     Call Emit("  function SapGr($fr, $pat, $gx) { SapChk ""Self-weight $pat on frame $fr"" ($m.FrameObj.SetLoadGravity($fr, $pat, [double]$gx, 0.0, 0.0, $false, 'Global', 0)) }")
@@ -1291,7 +1352,306 @@ Private Function WriteBuildScript(ByVal sdbPath As String, ByVal resultPath As S
     Call Emit("  SapCount 'joints' $m.PointObj " & JT_COUNT)
     Call Emit("  SapCount 'frames' $m.FrameObj " & FR_COUNT)
     Call Emit("  SapLog 'OK|Model built'")
-    Call EmitSapFinish(sdbPath)
+    Call EmitSapFinish(sdbPath, ForcePullScript(forcesPath))
+
+End Function
+
+' Script lines that read the solved model's frame forces - the table 1 and
+' table 2 combinations only, envelopes as Max/Min rows - for every frame
+' (group ALL) and write them to forcesPath, one result per line:
+'   frame <TAB> combination <TAB> step (""/Max/Min) <TAB> station <TAB>
+'   P <TAB> V2 <TAB> V3 <TAB> T <TAB> M2 <TAB> M3
+' in full precision with invariant number formatting.
+Private Function ForcePullScript(ByVal forcesPath As String) As String
+
+    Dim s As String
+    Dim c As Variant
+    Dim names As String
+
+    For Each c In ResultCombos(1)
+        names = names & IIf(Len(names) > 0, ", ", "") & PsQ(CStr(c))
+    Next c
+    For Each c In ResultCombos(2)
+        names = names & ", " & PsQ(CStr(c))
+    Next c
+
+    s = "  $rs = $m.Results.Setup" & vbCrLf
+    s = s & "  SapChk 'Results: deselect all' ($rs.DeselectAllCasesAndCombosForOutput())" & vbCrLf
+    s = s & "  SapChk 'Results: envelopes as Max/Min' ($rs.SetOptionMultiValuedCombo(1))" & vbCrLf
+    s = s & "  foreach ($cb in @(" & names & ")) { SapChk ""Results: select $cb"" ($rs.SetComboSelectedForOutput($cb, $true)) }" & vbCrLf
+    s = s & "  $nr = 0; $ob = [string[]]@(); $os = [double[]]@(); $el = [string[]]@(); $es = [double[]]@()" & vbCrLf
+    s = s & "  $lc = [string[]]@(); $sty = [string[]]@(); $snum = [double[]]@()" & vbCrLf
+    s = s & "  $fP = [double[]]@(); $fV2 = [double[]]@(); $fV3 = [double[]]@(); $fT = [double[]]@(); $fM2 = [double[]]@(); $fM3 = [double[]]@()" & vbCrLf
+    s = s & "  SapChk 'Frame forces' ($m.Results.FrameForce('ALL', 2, [ref]$nr, [ref]$ob, [ref]$os, [ref]$el, [ref]$es, [ref]$lc, [ref]$sty, [ref]$snum, [ref]$fP, [ref]$fV2, [ref]$fV3, [ref]$fT, [ref]$fM2, [ref]$fM3))" & vbCrLf
+    s = s & "  if ($nr -lt 1) { throw 'SAP2000 returned no frame forces' }" & vbCrLf
+    s = s & "  $inv = [Globalization.CultureInfo]::InvariantCulture" & vbCrLf
+    s = s & "  $rows = New-Object 'System.Collections.Generic.List[string]'" & vbCrLf
+    s = s & "  for ($k = 0; $k -lt $nr; $k++) { $rows.Add(($ob[$k], $lc[$k], $sty[$k], $os[$k].ToString('R', $inv), $fP[$k].ToString('R', $inv), $fV2[$k].ToString('R', $inv), $fV3[$k].ToString('R', $inv), $fT[$k].ToString('R', $inv), $fM2[$k].ToString('R', $inv), $fM3[$k].ToString('R', $inv)) -join ""`t"") }" & vbCrLf
+    s = s & "  [IO.File]::WriteAllLines(" & PsQ(forcesPath) & ", $rows, (New-Object Text.UTF8Encoding($true)))" & vbCrLf
+    s = s & "  SapLog ""OK|Frame forces: $nr results"""
+
+    ForcePullScript = s
+
+End Function
+
+' The combinations of results table 1 (every SLS-*, ULS-* and EQ-1 the
+' model has, in LOADCOMB_LIST order - the MIDAS builder's rule, ACC-1 left
+' out) or table 2 (the two envelopes).
+Private Function ResultCombos(ByVal tableNo As Long) As Collection
+
+    Dim rows() As String
+    Dim nm As String
+    Dim i As Long
+
+    Set ResultCombos = New Collection
+    If tableNo = 2 Then
+        ResultCombos.Add "ENV_SER"
+        ResultCombos.Add "ENV_ALL"
+        Exit Function
+    End If
+
+    rows = Split(LOADCOMB_LIST, ";")
+    For i = 0 To UBound(rows)
+        nm = Split(rows(i), "|")(0)
+        If Left$(nm, 4) = "SLS-" Or Left$(nm, 4) = "ULS-" Or nm = "EQ-1" Then ResultCombos.Add nm
+    Next i
+
+End Function
+
+
+' ===========================================================================
+'  RESULTS - SAP_RESULTS in the MIDAS_RESULTS layout (see CONFIG)
+' ===========================================================================
+
+' Reads the forces file, checks every frame has exactly its three stations
+' for every combination, makes SAP_RESULTS a copy of MIDAS_RESULTS and
+' replaces that copy's two data tables with SAP2000's values.
+Private Function WriteSapResults(ByVal forcesPath As String) As String
+
+    Dim raw As String
+    Dim lines() As String
+    Dim f() As String
+    Dim idx As Object
+    Dim sta() As Double, vals() As Double, cnt() As Long
+    Dim n As Long, i As Long, k As Long, key As String
+    Dim order() As Long
+    Dim t1 As Collection, t2 As Collection
+    Dim data1() As Variant, data2() As Variant
+    Dim c As Variant, stepName As Variant
+    Dim r As Long, res As String
+
+    raw = ReadUtf8File(forcesPath)
+    If Len(raw) = 0 Then
+        WriteSapResults = "SAP2000 wrote no frame forces (" & forcesPath & ")."
+        Exit Function
+    End If
+
+    ' One entry per frame|combination|step, its three stations as they come.
+    lines = Split(Replace(raw, vbCr, ""), vbLf)
+    Set idx = CreateObject("Scripting.Dictionary")
+    ReDim sta(1 To UBound(lines) + 1, 1 To 3)
+    ReDim vals(1 To UBound(lines) + 1, 1 To 3, 1 To 6)
+    ReDim cnt(1 To UBound(lines) + 1)
+    For i = 0 To UBound(lines)
+        If Len(lines(i)) > 0 Then
+            f = Split(lines(i), vbTab)
+            If UBound(f) <> 9 Then
+                WriteSapResults = "line " & (i + 1) & " of " & forcesPath & " has " & (UBound(f) + 1) & _
+                                  " fields, expected 10."
+                Exit Function
+            End If
+            key = f(0) & "|" & f(1) & "|" & f(2)
+            If Not idx.Exists(key) Then
+                n = n + 1
+                idx.Add key, n
+            End If
+            r = idx(key)
+            cnt(r) = cnt(r) + 1
+            If cnt(r) > 3 Then
+                WriteSapResults = "frame " & f(0) & ", " & f(1) & " " & f(2) & ": more than 3 output stations."
+                Exit Function
+            End If
+            sta(r, cnt(r)) = Val(f(3))
+            For k = 1 To 6
+                vals(r, cnt(r), k) = Val(f(3 + k))
+            Next k
+        End If
+    Next i
+
+    ' Frame indices by MIDAS number, ascending - the MIDAS table's order.
+    ReDim order(1 To FR_COUNT)
+    For i = 1 To FR_COUNT
+        order(i) = i
+    Next i
+    For i = 1 To FR_COUNT - 1
+        For k = i + 1 To FR_COUNT
+            If FR_NAME(order(k)) < FR_NAME(order(i)) Then
+                r = order(i): order(i) = order(k): order(k) = r
+            End If
+        Next k
+    Next i
+
+    Set t1 = ResultCombos(1)
+    Set t2 = ResultCombos(2)
+    ReDim data1(1 To t1.Count * FR_COUNT * 3, 1 To 9)
+    ReDim data2(1 To t2.Count * 2 * FR_COUNT * 3, 1 To 9)
+
+    r = 0
+    For Each c In t1
+        res = FillTableRows(data1, r, order, CStr(c), "", CStr(c), idx, sta, vals, cnt)
+        If Len(res) > 0 Then WriteSapResults = res: Exit Function
+    Next c
+    r = 0
+    For Each stepName In Array("Max", "Min")
+        For Each c In t2
+            res = FillTableRows(data2, r, order, CStr(c), CStr(stepName), _
+                                c & "(" & LCase$(stepName) & ")", idx, sta, vals, cnt)
+            If Len(res) > 0 Then WriteSapResults = res: Exit Function
+        Next c
+    Next stepName
+
+    WriteSapResults = PutResultsSheet(data1, data2)
+
+End Function
+
+' Appends one combination's rows - every frame in order, I / 2/4 / J - to
+' data at row r. The three stations are sorted along the frame.
+Private Function FillTableRows(ByRef data() As Variant, ByRef r As Long, ByRef order() As Long, _
+                               ByVal comboName As String, ByVal stepName As String, _
+                               ByVal loadLabel As String, ByVal idx As Object, _
+                               ByRef sta() As Double, ByRef vals() As Double, _
+                               ByRef cnt() As Long) As String
+
+    Dim i As Long, p As Long, q As Long, e As Long
+    Dim key As String
+    Dim pos(1 To 3) As Long
+    Dim tmp As Long
+
+    For i = 1 To FR_COUNT
+        key = FR_NAME(order(i)) & "|" & comboName & "|" & stepName
+        If Not idx.Exists(key) Then
+            FillTableRows = "SAP2000 returned no " & comboName & IIf(Len(stepName) > 0, " " & stepName, "") & _
+                            " forces for frame " & FR_NAME(order(i)) & "."
+            Exit Function
+        End If
+        e = idx(key)
+        If cnt(e) <> 3 Then
+            FillTableRows = "frame " & FR_NAME(order(i)) & ", " & comboName & ": " & cnt(e) & _
+                            " output stations, expected 3 (I, middle, J)."
+            Exit Function
+        End If
+
+        pos(1) = 1: pos(2) = 2: pos(3) = 3
+        For p = 1 To 2
+            For q = p + 1 To 3
+                If sta(e, pos(q)) < sta(e, pos(p)) Then tmp = pos(p): pos(p) = pos(q): pos(q) = tmp
+            Next q
+        Next p
+
+        For p = 1 To 3
+            r = r + 1
+            data(r, 1) = FR_NAME(order(i))
+            data(r, 2) = loadLabel
+            Select Case p
+                Case 1: data(r, 3) = "I[" & JT_NAME(FR_I(order(i))) & "]"
+                Case 2: data(r, 3) = "2/4"
+                Case 3: data(r, 3) = "J[" & JT_NAME(FR_J(order(i))) & "]"
+            End Select
+            ' SAP P V2 V3 T M2 M3 -> MIDAS Axial Shear-y Shear-z Torsion Moment-y Moment-z
+            data(r, 4) = Round(vals(e, pos(p), 1), FORCE_ROUND_DP)
+            data(r, 5) = Round(vals(e, pos(p), 3), FORCE_ROUND_DP)
+            data(r, 6) = Round(vals(e, pos(p), 2), FORCE_ROUND_DP)
+            data(r, 7) = Round(vals(e, pos(p), 4), FORCE_ROUND_DP)
+            data(r, 8) = Round(vals(e, pos(p), 6), FORCE_ROUND_DP)
+            data(r, 9) = Round(vals(e, pos(p), 5), FORCE_ROUND_DP)
+        Next p
+    Next i
+
+End Function
+
+' SAP_RESULTS := MIDAS_RESULTS's cells (headers, summary block, helper
+' formulas, formats, column widths), its two data tables emptied and filled
+' with data1 (B:J from row 3) and data2 (S:AA from row 36). The helper
+' formulas (L:O, AC:AF) are extended when a table outgrows them, as the
+' MIDAS builder does. A missing SAP_RESULTS is added after MIDAS_RESULTS.
+Private Function PutResultsSheet(ByRef data1() As Variant, ByRef data2() As Variant) As String
+
+    Dim wsM As Worksheet, wsS As Worksheet
+    Dim calcMode As Long
+    Dim last As Long, n1 As Long, n2 As Long
+    Dim stage As String
+
+    On Error Resume Next
+    Set wsM = ThisWorkbook.Worksheets(LAYOUT_SHEET_NAME)
+    Set wsS = ThisWorkbook.Worksheets(RESULT_SHEET_NAME)
+    On Error GoTo 0
+    If wsM Is Nothing Then
+        PutResultsSheet = "sheet " & LAYOUT_SHEET_NAME & " not found - its layout is what " & _
+                          RESULT_SHEET_NAME & " copies."
+        Exit Function
+    End If
+
+    n1 = UBound(data1, 1)
+    n2 = UBound(data2, 1)
+    calcMode = Application.Calculation
+
+    On Error GoTo Failed
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+
+    stage = "create " & RESULT_SHEET_NAME
+    If wsS Is Nothing Then
+        Set wsS = ThisWorkbook.Worksheets.Add(After:=wsM)
+        wsS.Name = RESULT_SHEET_NAME
+    End If
+
+    stage = "copy the " & LAYOUT_SHEET_NAME & " layout"
+    wsS.Cells.Clear
+    wsM.Cells.Copy Destination:=wsS.Cells
+    Application.CutCopyMode = False
+
+    ' The copy carries MIDAS's numbers - empty both tables before anything
+    ' else can fail, so SAP_RESULTS never shows MIDAS values as SAP's.
+    stage = "empty the tables"
+    last = wsS.Cells(wsS.Rows.Count, 2).End(xlUp).Row
+    If last >= 3 Then wsS.Range(wsS.Cells(3, 2), wsS.Cells(last, 10)).ClearContents
+    last = wsS.Cells(wsS.Rows.Count, 19).End(xlUp).Row
+    If last >= 36 Then wsS.Range(wsS.Cells(36, 19), wsS.Cells(last, 27)).ClearContents
+
+    ' Part stays text ("2/4" would otherwise turn into a date).
+    stage = "write the tables"
+    wsS.Range(wsS.Cells(3, 4), wsS.Cells(2 + n1, 4)).NumberFormat = "@"
+    wsS.Range(wsS.Cells(36, 21), wsS.Cells(35 + n2, 21)).NumberFormat = "@"
+    wsS.Range(wsS.Cells(3, 2), wsS.Cells(2 + n1, 10)).Value = data1
+    wsS.Range(wsS.Cells(36, 19), wsS.Cells(35 + n2, 27)).Value = data2
+
+    stage = "extend the helper formulas"
+    last = wsS.Cells(wsS.Rows.Count, 12).End(xlUp).Row
+    If last < 2 + n1 And last >= 3 Then
+        wsS.Range(wsS.Cells(3, 12), wsS.Cells(3, 15)).AutoFill _
+            Destination:=wsS.Range(wsS.Cells(3, 12), wsS.Cells(2 + n1, 15))
+    End If
+    last = wsS.Cells(wsS.Rows.Count, 29).End(xlUp).Row
+    If last < 35 + n2 And last >= 36 Then
+        wsS.Range(wsS.Cells(36, 29), wsS.Cells(36, 32)).AutoFill _
+            Destination:=wsS.Range(wsS.Cells(36, 29), wsS.Cells(35 + n2, 32))
+    End If
+
+    Application.Calculation = calcMode
+    Application.ScreenUpdating = True
+    Exit Function
+
+Failed:
+    PutResultsSheet = stage & ": VBA error " & Err.Number & " - " & Err.Description & _
+                      " - " & RESULT_SHEET_NAME & "'s tables were left empty."
+    On Error Resume Next
+    Application.CutCopyMode = False
+    If Not wsS Is Nothing Then
+        wsS.Range(wsS.Cells(3, 2), wsS.Cells(wsS.Rows.Count, 10)).ClearContents
+        wsS.Range(wsS.Cells(36, 19), wsS.Cells(wsS.Rows.Count, 27)).ClearContents
+    End If
+    Application.Calculation = calcMode
+    Application.ScreenUpdating = True
 
 End Function
 
@@ -1329,22 +1689,23 @@ Private Sub EmitSections()
 
 End Sub
 
-' Joints 1..JT_COUNT and frames 1..FR_COUNT exactly as ExpandModel numbered
-' them. MIDAS beta -180 (left wall) is SAP's 180; 0 is left alone.
+' Joints and frames under the MIDAS numbers ExpandModel gave them (every
+' frame gets 3 output stations: I end, middle, J end - the MIDAS table's
+' I, 2/4, J). MIDAS beta -180 (left wall) is SAP's 180; 0 is left alone.
 Private Sub EmitJointsAndFrames()
 
     Dim jt As Long, fr As Long
     Dim a As Double
 
     For jt = 1 To JT_COUNT
-        Call Emit("  SapPt '" & jt & "' " & PsNum(JT_X(jt)) & " " & PsNum(JT_Z(jt)))
+        Call Emit("  SapPt '" & JT_NAME(jt) & "' " & PsNum(JT_X(jt)) & " " & PsNum(JT_Z(jt)))
     Next jt
 
     For fr = 1 To FR_COUNT
         a = FR_ANGLE(fr)
         Do While a > 180: a = a - 360: Loop
         Do While a <= -180: a = a + 360: Loop
-        Call Emit("  SapFr '" & fr & "' '" & FR_I(fr) & "' '" & FR_J(fr) & "' " & _
+        Call Emit("  SapFr '" & FR_NAME(fr) & "' '" & JT_NAME(FR_I(fr)) & "' '" & JT_NAME(FR_J(fr)) & "' " & _
                   PsQ(SectionNameOf(FR_SECT(fr))) & " " & PsNum(a))
     Next fr
 
@@ -1400,7 +1761,7 @@ Private Function EmitSprings() As String
             ltrib = (xs(i + 1) - xs(i - 1)) / 2
         End If
         kz = SPRING_KZ_MODULUS * ltrib
-        Call Emit("  SapSpr '" & ids(i) & "' " & PsNum(kz / 2) & " " & PsNum(kz))
+        Call Emit("  SapSpr '" & JT_NAME(ids(i)) & "' " & PsNum(kz / 2) & " " & PsNum(kz))
     Next i
 
     SPRING_COUNT = n
@@ -1478,7 +1839,7 @@ Private Function EmitDistributedLoads() As String
         p1 = Val(f(4))
         p2 = Val(f(5))
         For k = 0 To pieces - 1
-            Call Emit("  SapLd '" & (ELEM_FIRST_FRAME(elemNo) + k) & "' " & PsQ(SapName(f(1))) & " " & loadDir & " " & _
+            Call Emit("  SapLd '" & FR_NAME(ELEM_FIRST_FRAME(elemNo) + k) & "' " & PsQ(SapName(f(1))) & " " & loadDir & " " & _
                       PsNum(Round(loadSign * (p1 + (p2 - p1) * k / pieces), LOAD_ROUND_DP)) & " " & _
                       PsNum(Round(loadSign * (p1 + (p2 - p1) * (k + 1) / pieces), LOAD_ROUND_DP)))
             LOAD_COUNT = LOAD_COUNT + 1
@@ -1496,7 +1857,7 @@ Private Sub EmitSeismicSelfWeight()
 
     If Not SEISMIC_ACTIVE Then Exit Sub
     For fr = 1 To FR_COUNT
-        Call Emit("  SapGr '" & fr & "' 'ATA' " & PsNum(DIM_ATA_FACTOR))
+        Call Emit("  SapGr '" & FR_NAME(fr) & "' 'ATA' " & PsNum(DIM_ATA_FACTOR))
     Next fr
 
 End Sub
@@ -1580,7 +1941,7 @@ Private Function ValidateSections() As String
 
     For fr = 1 To FR_COUNT
         If Len(SectionNameOf(FR_SECT(fr))) = 0 Then
-            ValidateSections = "frame " & fr & " uses section " & FR_SECT(fr) & ", which was not defined."
+            ValidateSections = "frame " & FR_NAME(fr) & " uses section " & FR_SECT(fr) & ", which was not defined."
             Exit Function
         End If
     Next fr
@@ -1750,12 +2111,15 @@ End Sub
 
 ' Save, analyse, show, and close the try block. On any failure the script
 ' closes its SAP2000 again, so nothing half-built is left behind.
-Private Sub EmitSapFinish(ByVal sdbPath As String)
+' afterAnalysis: script lines run on the solved model before it is shown
+' (the culvert pulls its frame forces there); "" for none.
+Private Sub EmitSapFinish(ByVal sdbPath As String, Optional ByVal afterAnalysis As String = "")
 
     Call Emit("  SapChk 'Save' ($m.File.Save(" & PsQ(sdbPath) & "))")
     Call Emit("  SapLog " & PsQ("OK|Saved " & sdbPath))
     Call Emit("  SapChk 'Analysis' ($m.Analyze.RunAnalysis())")
     Call Emit("  SapLog 'OK|Analysis run'")
+    If Len(afterAnalysis) > 0 Then Call Emit(afterAnalysis)
     Call Emit("  if (-not $sap.Visible()) { SapChk 'Show SAP2000' ($sap.Unhide()) }")
     Call Emit("  SapLog 'DONE'")
     Call Emit("} catch {")
