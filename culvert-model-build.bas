@@ -28,14 +28,14 @@ Option Explicit
 ' so a screenshot of a run does not otherwise say which build produced it -
 ' bump this whenever the file changes and check it matches before
 ' diagnosing anything from a report.
-Private Const SCRIPT_VERSION As String = "2026-09-24a"
+Private Const SCRIPT_VERSION As String = "2026-09-24b"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "No haunch (B8 or B9 = 0) no longer creates zero-length members - they are left out and their neighbours meet; equal top and bottom earth pressure (e.g. a blank row) gives a uniform profile instead of an Overflow error."
+Private Const SCRIPT_CHANGELOG As String = "kh (MIDAS_INPUT!B15) = 0 or blank with the seismic gate on no longer fails: the ATA load case is kept without its self-weight (MIDAS rejected an all-zero one)."
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -270,7 +270,8 @@ Private Const SECTION_COLOR_OPACITY As Double = 0.5
 '  When TRUE, the complete seismic chain is active:
 '    db/STLD    EQ and ATA load cases created
 '    db/BMLD    EQ lateral earth pressure beam loads applied
-'    db/BODF    ATA self-weight inertia acceleration applied
+'    db/BODF    ATA self-weight inertia acceleration applied - only when
+'               kh (B15) is not 0; kh = 0 keeps the ATA case, empty
 '    db/LCOM    EQ-1 combo created and added to ENV_ALL envelope
 '    post/TABLE PostBeamForceResults retrieves EQ-1(CB) into Table 1
 '               and reflects it in Table 2 envelopes
@@ -541,6 +542,10 @@ Sub BuildCulvertModel()
     If ok Then ok = StepResult(report, Progress("Elements"), PostElements())
     If ok Then ok = StepResult(report, Progress("Static Load Cases"), PostStaticLoadCases())
     If ok Then ok = StepResult(report, Progress("Self-Weight"), PostSelfWeight())
+    If ok And SEISMIC_ACTIVE And DIM_ATA_FACTOR = 0 Then
+        report = report & "NOTE - kh (" & INPUT_SHEET_NAME & "!B15) is 0: ATA load case kept, " & _
+                 "no ATA self-weight." & vbCrLf
+    End If
     If ok Then ok = StepResult(report, Progress("Beam Loads"), PostBeamLoads())
     If ok Then ok = StepResult(report, Progress("Load Combinations"), PostLoadCombinations())
     If ok Then ok = StepResult(report, Progress("Divide Elements"), PostDivideElements())
@@ -1937,14 +1942,16 @@ End Function
 
 ' *SELFWEIGHT under DL is (0, 0, -1); under ATA it is (B15, 0, 0) - the
 ' seismic inertia factor applied along global X. The ATA record is
-' dropped entirely when SEISMIC_ACTIVE is False, along with its load case.
+' dropped entirely when SEISMIC_ACTIVE is False, along with its load case,
+' and on its own when kh (B15) is 0 or blank - the ATA case stays (owner's
+' decision, 2026-09-24); MIDAS rejects an all-zero self-weight anyway.
 Private Function PostSelfWeight() As String
 
     Dim b As String
 
     b = "{""Assign"": {"
     b = b & SelfWeightJson(1, "DL", 0, 0, -1)
-    If SEISMIC_ACTIVE Then
+    If SEISMIC_ACTIVE And DIM_ATA_FACTOR <> 0 Then
         b = b & "," & SelfWeightJson(2, "ATA", DIM_ATA_FACTOR, 0, 0)
     End If
     b = b & "}}"

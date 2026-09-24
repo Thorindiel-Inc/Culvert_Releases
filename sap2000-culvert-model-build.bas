@@ -59,10 +59,10 @@ Option Explicit
 ' ---------------------------------------------------------------------------
 
 ' Stamped into the report title. Bump with every change to this file.
-Private Const SCRIPT_VERSION As String = "2026-09-24e"
+Private Const SCRIPT_VERSION As String = "2026-09-24f"
 
 ' One line, no "_" continuation, no "|" - read by the updater's manifest.
-Private Const SCRIPT_CHANGELOG As String = "Writes the SAP2000 frame forces into MIDAS_RESULTS (its two tables, where the MIDAS builder puts them) instead of SAP_RESULTS, so 6_DONATI reads them directly."
+Private Const SCRIPT_CHANGELOG As String = "kh (MIDAS_INPUT!B15) = 0 or blank with the seismic gate on: the ATA load pattern is kept without its self-weight, as in the MIDAS builder."
 
 ' Identifies this module to the updater whatever it was named in Excel.
 Private Const SCRIPT_ID As String = "sap2000-culvert-model-build"
@@ -314,6 +314,10 @@ Public Sub BuildSap2000Model()
         Call GenerateBeamLoads
         Call GenerateLoadCombinations
         ok = StepResult(report, "Divide + number", ExpandModel())
+        If SEISMIC_ACTIVE And DIM_ATA_FACTOR = 0 Then
+            report = report & "NOTE - kh (" & INPUT_SHEET_NAME & "!B15) is 0: ATA load pattern kept, " & _
+                     "no ATA self-weight." & vbCrLf
+        End If
     End If
 
     stage = "build script"
@@ -1833,12 +1837,13 @@ Private Function EmitDistributedLoads() As String
 End Function
 
 ' ATA: the MIDAS db/BODF record FV = [kh, 0, 0] - self-weight along global
-' X. Seismic only, like the ATA pattern itself.
+' X. Seismic only, like the ATA pattern itself; with kh (B15) = 0 the ATA
+' pattern stays but carries nothing, as in the MIDAS builder.
 Private Sub EmitSeismicSelfWeight()
 
     Dim fr As Long
 
-    If Not SEISMIC_ACTIVE Then Exit Sub
+    If Not SEISMIC_ACTIVE Or DIM_ATA_FACTOR = 0 Then Exit Sub
     For fr = 1 To FR_COUNT
         Call Emit("  SapGr '" & FR_NAME(fr) & "' 'ATA' " & PsNum(DIM_ATA_FACTOR))
     Next fr
