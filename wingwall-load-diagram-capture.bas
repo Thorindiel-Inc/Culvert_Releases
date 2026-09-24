@@ -28,14 +28,14 @@ Option Explicit
 ' hand, so the file in the repo and the code actually running can silently
 ' diverge - check this stamp matches the constant here before concluding
 ' anything from a run. Bump it whenever this file changes.
-Private Const SCRIPT_VERSION As String = "2026-09-23g"
+Private Const SCRIPT_VERSION As String = "2026-09-24b"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Audit rev 2: skips jobs whose load case or combination is not in the model, deletes the old JPEG before capturing, inserts the new picture before removing the old one, warns instead of aborting on a failed unit switch, re-reads the MAPI key every run, validates element lists, and puts failures first with a log file when the report is long."
+Private Const SCRIPT_CHANGELOG As String = "The bare 2D capture now shows the foundation springs and supports (new Springs field per LOAD_JOB_LIST row); the 3D capture and every load case hide them."
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -74,7 +74,7 @@ Private Const CAPTURE_SUBFOLDER As String = "WINGWALL_LOADS"
 ' sheet is active when the macro runs.
 Private Const TARGET_SHEET_NAME As String = "3_MODEL"
 
-' One capture per row: CaseType|CaseName|OutputFileName|ShapeName|Hidden
+' One capture per row: CaseType|CaseName|OutputFileName|ShapeName|Hidden|Springs
 '   CaseType : "ST" (Static Load) is the only value the Display doc confirms.
 '              Leave CaseType/CaseName both empty for a bare model capture
 '              with no load overlay at all (the "2D"/"3D" rows below).
@@ -84,25 +84,28 @@ Private Const TARGET_SHEET_NAME As String = "3_MODEL"
 '   Hidden   : "1" for SET_HIDDEN true (hidden-line removal on), "0" for
 '              false. Only meaningfully different for the "2D"/"3D" rows -
 '              every load-case row above them keeps Hidden=0 as before.
+'   Springs  : "1" shows the foundation springs/supports (per
+'              SHOW_POINT_SPRING_SUPPORT/SHOW_SUPPORT), "0" hides them.
+'              Only the "2D" row shows them; "3D" and every load case hide.
 ' Rows separated by ";". TODO: ShapeName below is a placeholder guess
 ' ('dl, 'ehs2_l, ...) following the naming convention already used in
 ' midas-load-diagram-capture.bas's LOAD_JOB_LIST - rename to match the
 ' actual Picture/Shape names once they exist on TARGET_SHEET_NAME.
 Private Const LOAD_JOB_LIST As String = _
-    "ST|EHS2_L|EHS2_L|'ehs2_l|0;" & _
-    "ST|EHA2_L|EHA2_L|'eha2_l|0;" & _
-    "ST|EHS2_R|EHS2_R|'ehs2_r|0;" & _
-    "ST|EHA2_R|EHA2_R|'eha2_r|0;" & _
-    "ST|LSS1_L|LSS1_L|'lss1_l|0;" & _
-    "ST|LSS1_R|LSS1_R|'lss1_r|0;" & _
-    "ST|EQ_L|EQ_L|'eq_l|0;" & _
-    "ST|EQ_R|EQ_R|'eq_r|0;" & _
-    "||2D|'2d|0;" & _
-    "||3D|'3d|1"
+    "ST|EHS2_L|EHS2_L|'ehs2_l|0|0;" & _
+    "ST|EHA2_L|EHA2_L|'eha2_l|0|0;" & _
+    "ST|EHS2_R|EHS2_R|'ehs2_r|0|0;" & _
+    "ST|EHA2_R|EHA2_R|'eha2_r|0|0;" & _
+    "ST|LSS1_L|LSS1_L|'lss1_l|0|0;" & _
+    "ST|LSS1_R|LSS1_R|'lss1_r|0|0;" & _
+    "ST|EQ_L|EQ_L|'eq_l|0|0;" & _
+    "ST|EQ_R|EQ_R|'eq_r|0|0;" & _
+    "||2D|'2d|0|1;" & _
+    "||3D|'3d|1|0"
 
-'    "ST|DL|DL|'dl|0;" & _
-'    "ST|ATA_L|ATA_L|'ata_l|0;" & _
-'    "ST|ATA_R|ATA_R|'ata_r|0"
+'    "ST|DL|DL|'dl|0|0;" & _
+'    "ST|ATA_L|ATA_L|'ata_l|0|0;" & _
+'    "ST|ATA_R|ATA_R|'ata_r|0|0"
 
 ' Image size in pixels.
 Private Const IMG_WIDTH As Long = 1269
@@ -133,6 +136,13 @@ Private Const SHOW_PRESSURE_LOAD As Boolean = True
 Private Const SHOW_AREA_PRESSURE_LOADS As Boolean = True
 Private Const SHOW_PLANE_LOAD As Boolean = True
 Private Const SHOW_SPECIFIED_DISPLACEMENT As Boolean = False
+
+' Boundary display options (per view/DISPLAY manual: BOUNDARY object), for
+' rows whose Springs field is "1" (the "2D" row) - every other row hides them.
+' The foundation springs are point springs: the wingwall builder's ope/SSPS
+' converts the surface spring into db/NSPR point springs.
+Private Const SHOW_POINT_SPRING_SUPPORT As Boolean = True
+Private Const SHOW_SUPPORT As Boolean = True
 
 ' Load value label format/decimals, per the Display doc's LOAD_VALUE object.
 '   FORMAT: "Default" | "Fixed" | "Scientific"
@@ -180,6 +190,7 @@ Private Type LoadJob
     FileName As String
     ShapeName As String
     Hidden As Boolean
+    Springs As Boolean
 End Type
 
 
@@ -200,6 +211,7 @@ Sub CaptureWingwallLoadDiagrams()
     Dim prevCalc As XlCalculation
     Dim fastMode As Boolean
     Dim report As String
+    Dim dispResult As String
 
     Dim label As String
     Dim okLog As String, warnLog As String, skipLog As String, failLog As String
@@ -278,6 +290,18 @@ Sub CaptureWingwallLoadDiagrams()
             skipCount = skipCount + 1
             skipLog = skipLog & "  - " & label & vbCrLf
         Else
+            ' Explicit view/DISPLAY boundary toggle in addition to the inline
+            ' DISPLAY.BOUNDARY field - the inline field alone let springs
+            ' carry over onto later captures in the culvert script. Springs
+            ' on only for rows with Springs = 1 (the "2D" row). A failure is
+            ' only a WARN: the inline field is still sent.
+            dispResult = SendDisplayBoundaryRequest(jobs(i).Springs)
+            If Len(dispResult) > 0 Then
+                warnCount = warnCount + 1
+                warnLog = warnLog & "  - " & label & ": view/DISPLAY boundary toggle failed: " & _
+                          dispResult & vbCrLf
+            End If
+
             body = BuildLoadCaptureBody(exportPath, jobs(i))
             Call LogOutcome(CaptureToShape(ws, exportPath, body, jobs(i).ShapeName), label, _
                             okCount, okLog, warnCount, warnLog, failCount, failLog)
@@ -574,7 +598,7 @@ Private Sub SendUnitRequest(ByVal httpMethod As String, ByVal body As String, _
 End Sub
 
 
-' Parses LOAD_JOB_LIST ("Type|Name|FileName|ShapeName|Hidden;...") into an array.
+' Parses LOAD_JOB_LIST ("Type|Name|FileName|ShapeName|Hidden|Springs;...") into an array.
 Private Function ParseLoadJobList(ByVal listStr As String) As LoadJob()
 
     Dim rows() As String
@@ -590,16 +614,17 @@ Private Function ParseLoadJobList(ByVal listStr As String) As LoadJob()
 
         ' A missing "|" used to surface as "Subscript out of range"
         ' on the field read below, naming neither the row nor the cause.
-        If UBound(fields) < 4 Then
+        If UBound(fields) < 5 Then
             Err.Raise vbObjectError + 513, "ParseLoadJobList", _
                 "LOAD_JOB_LIST row " & (i + 1) & " has " & (UBound(fields) + 1) & _
-                " field(s), expected 5. Check the ""|"" separators in:  " & rows(i)
+                " field(s), expected 6. Check the ""|"" separators in:  " & rows(i)
         End If
         result(i).CaseType = Trim(fields(0))
         result(i).CaseName = Trim(fields(1))
         result(i).FileName = Trim(fields(2))
         result(i).ShapeName = Trim(fields(3))
         result(i).Hidden = (Trim(fields(4)) = "1")
+        result(i).Springs = (Trim(fields(5)) = "1")
     Next i
 
     ParseLoadJobList = result
@@ -653,11 +678,30 @@ Private Function BuildLoadCaptureBody(ByVal exportPath As String, _
                  ", ""VERTICAL"": " & VIEW_ANGLE_VERTICAL_FOR_L_SIDE & "},"
     End If
 
-    ' ---- DISPLAY.NODE / DISPLAY.LOAD, per the "Display" JSON Manual ----
+    ' ---- DISPLAY.NODE / DISPLAY.BOUNDARY / DISPLAY.LOAD, per the "Display" JSON Manual ----
     b = b & """DISPLAY"": {"
     b = b & """NODE"": {"
     b = b & """NODE"": false"
     b = b & "}"
+
+    ' BOUNDARY is sent explicitly on every job: on (per the SHOW_*
+    ' constants) for rows with Springs = 1 (the "2D" row), false for the
+    ' rest, so a previous capture's boundary state cannot carry over.
+    If job.Springs Then
+        If SHOW_POINT_SPRING_SUPPORT Or SHOW_SUPPORT Then
+            b = b & ","
+            b = b & """BOUNDARY"": {"
+            b = b & """POINT_SPRING_SUPPORT"": " & LCase(SHOW_POINT_SPRING_SUPPORT) & ","
+            b = b & """SUPPORT"": " & LCase(SHOW_SUPPORT)
+            b = b & "}"
+        End If
+    Else
+        b = b & ","
+        b = b & """BOUNDARY"": {"
+        b = b & """POINT_SPRING_SUPPORT"": false,"
+        b = b & """SUPPORT"": false"
+        b = b & "}"
+    End If
 
     If Len(job.CaseType) > 0 Then
         b = b & ","
@@ -940,6 +984,67 @@ Private Function WaitForFile(ByVal filePath As String, ByVal timeoutSeconds As L
     Loop
 
     WaitForFile = True
+
+End Function
+
+' Explicitly sets the boundary/spring display toggle via view/DISPLAY (a
+' separate POST endpoint from view/CAPTURE - "Display" JSON Manual). Ported
+' from midas-culvert-load-diagram-capture.bas, where the inline
+' DISPLAY.BOUNDARY field alone let springs carry over onto later captures.
+' Called once per job, right before the capture: on for rows with
+' Springs = 1 (the "2D" row), off for the rest.
+'
+' Returns "" on success (2xx, no "error" key), else a short failure message.
+' Not fatal: the caller logs a WARN and the inline field is still sent.
+Private Function SendDisplayBoundaryRequest(ByVal showBoundary As Boolean) As String
+
+    Dim url As String
+    Dim body As String
+    Dim resp As String
+    Dim statusCode As Long
+
+    url = API_BASE_URL & "/view/DISPLAY"
+    body = "{""Argument"": {""BOUNDARY"": {"
+    body = body & """SUPPORT"": " & LCase(showBoundary) & ","
+    body = body & """POINT_SPRING_SUPPORT"": " & LCase(showBoundary)
+    body = body & "}}}"
+
+    If HTTP_CLIENT Is Nothing Then
+        Set HTTP_CLIENT = CreateObject("WinHttp.WinHttpRequest.5.1")
+    End If
+
+    On Error Resume Next
+
+    HTTP_CLIENT.Open "POST", url, False
+    HTTP_CLIENT.SetRequestHeader "MAPI-Key", MapiKey()
+    HTTP_CLIENT.SetRequestHeader "Content-Type", "application/json"
+    If Err.Number <> 0 Then
+        SendDisplayBoundaryRequest = "WinHTTP error: " & Err.Description
+        Err.Clear
+        Set HTTP_CLIENT = Nothing
+        On Error GoTo 0
+        Exit Function
+    End If
+
+    HTTP_CLIENT.Send body
+    If Err.Number <> 0 Then
+        SendDisplayBoundaryRequest = "WinHTTP error: " & Err.Description
+        Err.Clear
+        ' Never reuse a client that just failed.
+        Set HTTP_CLIENT = Nothing
+        On Error GoTo 0
+        Exit Function
+    End If
+    On Error GoTo 0
+
+    statusCode = HTTP_CLIENT.Status
+    resp = HTTP_CLIENT.ResponseText
+
+    If statusCode >= 200 And statusCode < 300 And InStr(1, resp, """error""", vbTextCompare) = 0 Then
+        SendDisplayBoundaryRequest = ""
+    Else
+        SendDisplayBoundaryRequest = "HTTP " & statusCode & HttpStatusHint(statusCode) & ShortApiError(resp)
+    End If
 
 End Function
 
