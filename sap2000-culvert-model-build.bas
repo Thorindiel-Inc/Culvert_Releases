@@ -7,8 +7,8 @@ Option Explicit
 '  <workbook folder>\SAP2000\<workbook name>.sdb, runs the analysis and
 '  leaves SAP2000 open with the solved model. It starts its OWN SAP2000 -
 '  one already open is never touched. The frame forces come back into
-'  SAP_RESULTS, laid out exactly as MIDAS_RESULTS (see RESULTS below);
-'  no other worksheet is changed and SAP_INPUT is not read.
+'  MIDAS_RESULTS's two tables, replacing the MIDAS results there (see
+'  RESULTS below); no other worksheet is changed.
 '
 '  HOW IT REACHES SAP2000: Excel is 64-bit and the SAP2000 17 API is 32-bit
 '  only, so the macro writes a PowerShell script (SAP2000\<name>_build.ps1,
@@ -31,8 +31,8 @@ Option Explicit
 '    db/NSPR          joint springs on every z = 0 joint, same tributary rule
 '    db/BODF          DL = self-weight multiplier 1; ATA = gravity along X
 '  Joints and frames carry the numbers MIDAS gives them, division pieces
-'  included (see ExpandModel), so a frame in SAP2000, in SAP_RESULTS and in
-'  MIDAS_RESULTS is the same member under the same number.
+'  included (see ExpandModel), so a frame in SAP2000 and in MIDAS_RESULTS
+'  is the same member under the same number.
 '
 '  Owner's decisions (2026-09-24), against the hand-built reference model
 '  old/SAP2000/3.00x3.00_Hd_3.0m.$2k:
@@ -59,10 +59,10 @@ Option Explicit
 ' ---------------------------------------------------------------------------
 
 ' Stamped into the report title. Bump with every change to this file.
-Private Const SCRIPT_VERSION As String = "2026-09-24d"
+Private Const SCRIPT_VERSION As String = "2026-09-24e"
 
 ' One line, no "_" continuation, no "|" - read by the updater's manifest.
-Private Const SCRIPT_CHANGELOG As String = "Pulls the frame forces back into SAP_RESULTS in the MIDAS_RESULTS layout (same tables, formulas and element numbers); SAP2000 joints and frames now carry the MIDAS numbers."
+Private Const SCRIPT_CHANGELOG As String = "Writes the SAP2000 frame forces into MIDAS_RESULTS (its two tables, where the MIDAS builder puts them) instead of SAP_RESULTS, so 6_DONATI reads them directly."
 
 ' Identifies this module to the updater whatever it was named in Excel.
 Private Const SCRIPT_ID As String = "sap2000-culvert-model-build"
@@ -93,17 +93,16 @@ Private Const GRAVITY_ACCEL As Double = 9.80665
 ' Every section is a solid rectangle <depth> x 1.0 m, the per-metre strip.
 Private Const SECTION_WIDTH As Double = 1#
 
-' RESULTS - SAP_RESULTS becomes a copy of MIDAS_RESULTS (headers, summary
-' block, helper formulas, formats) whose two data tables hold SAP2000's
-' forces instead, row for row as the MIDAS builder writes them:
+' RESULTS - SAP2000's forces go into MIDAS_RESULTS's two data tables,
+' replacing what is there, row for row as the MIDAS builder writes them
+' (headers, summary block and helper formulas stay as they are):
 '   table 1  B:J from row 3    every SLS-*, ULS-* and EQ-1 combination
 '   table 2  S:AA from row 36  ENV_SER/ENV_ALL max, then ENV_SER/ENV_ALL min
 ' Combination outer, element ascending, then I[node], 2/4, J[node]; values
 ' to 2 dp (MIDAS STYLES PLACE 2). MIDAS columns from SAP (measured against a
 ' MIDAS build, same signs): Axial = P, Shear-y = V3, Shear-z = V2,
 ' Torsion = T, Moment-y = M3, Moment-z = M2.
-Private Const RESULT_SHEET_NAME As String = "SAP_RESULTS"
-Private Const LAYOUT_SHEET_NAME As String = "MIDAS_RESULTS"
+Private Const RESULT_SHEET_NAME As String = "MIDAS_RESULTS"
 Private Const FORCE_ROUND_DP As Long = 2
 
 ' Beam-load values are rounded to 3 dp, like the MIDAS builder's AddLoad.
@@ -1420,12 +1419,12 @@ End Function
 
 
 ' ===========================================================================
-'  RESULTS - SAP_RESULTS in the MIDAS_RESULTS layout (see CONFIG)
+'  RESULTS - into MIDAS_RESULTS (see CONFIG)
 ' ===========================================================================
 
 ' Reads the forces file, checks every frame has exactly its three stations
-' for every combination, makes SAP_RESULTS a copy of MIDAS_RESULTS and
-' replaces that copy's two data tables with SAP2000's values.
+' for every combination, and replaces MIDAS_RESULTS's two data tables with
+' SAP2000's values.
 Private Function WriteSapResults(ByVal forcesPath As String) As String
 
     Dim raw As String
@@ -1569,25 +1568,23 @@ Private Function FillTableRows(ByRef data() As Variant, ByRef r As Long, ByRef o
 
 End Function
 
-' SAP_RESULTS := MIDAS_RESULTS's cells (headers, summary block, helper
-' formulas, formats, column widths), its two data tables emptied and filled
-' with data1 (B:J from row 3) and data2 (S:AA from row 36). The helper
-' formulas (L:O, AC:AF) are extended when a table outgrows them, as the
-' MIDAS builder does. A missing SAP_RESULTS is added after MIDAS_RESULTS.
+' MIDAS_RESULTS's two data tables emptied and filled with data1 (B:J from
+' row 3) and data2 (S:AA from row 36) - exactly where the MIDAS builder puts
+' its results, so the headers, the summary block (read by 6_DONATI) and the
+' helper formulas carry on unchanged. The helper formulas (L:O, AC:AF) are
+' extended when a table outgrows them, as the MIDAS builder does.
 Private Function PutResultsSheet(ByRef data1() As Variant, ByRef data2() As Variant) As String
 
-    Dim wsM As Worksheet, wsS As Worksheet
+    Dim ws As Worksheet
     Dim calcMode As Long
     Dim last As Long, n1 As Long, n2 As Long
     Dim stage As String
 
     On Error Resume Next
-    Set wsM = ThisWorkbook.Worksheets(LAYOUT_SHEET_NAME)
-    Set wsS = ThisWorkbook.Worksheets(RESULT_SHEET_NAME)
+    Set ws = ThisWorkbook.Worksheets(RESULT_SHEET_NAME)
     On Error GoTo 0
-    If wsM Is Nothing Then
-        PutResultsSheet = "sheet " & LAYOUT_SHEET_NAME & " not found - its layout is what " & _
-                          RESULT_SHEET_NAME & " copies."
+    If ws Is Nothing Then
+        PutResultsSheet = "sheet " & RESULT_SHEET_NAME & " not found in this workbook."
         Exit Function
     End If
 
@@ -1599,57 +1596,43 @@ Private Function PutResultsSheet(ByRef data1() As Variant, ByRef data2() As Vari
     Application.ScreenUpdating = False
     Application.Calculation = xlCalculationManual
 
-    stage = "create " & RESULT_SHEET_NAME
-    If wsS Is Nothing Then
-        Set wsS = ThisWorkbook.Worksheets.Add(After:=wsM)
-        wsS.Name = RESULT_SHEET_NAME
-    End If
-
-    stage = "copy the " & LAYOUT_SHEET_NAME & " layout"
-    wsS.Cells.Clear
-    wsM.Cells.Copy Destination:=wsS.Cells
-    Application.CutCopyMode = False
-
-    ' The copy carries MIDAS's numbers - empty both tables before anything
-    ' else can fail, so SAP_RESULTS never shows MIDAS values as SAP's.
     stage = "empty the tables"
-    last = wsS.Cells(wsS.Rows.Count, 2).End(xlUp).Row
-    If last >= 3 Then wsS.Range(wsS.Cells(3, 2), wsS.Cells(last, 10)).ClearContents
-    last = wsS.Cells(wsS.Rows.Count, 19).End(xlUp).Row
-    If last >= 36 Then wsS.Range(wsS.Cells(36, 19), wsS.Cells(last, 27)).ClearContents
+    last = ws.Cells(ws.Rows.Count, 2).End(xlUp).Row
+    If last >= 3 Then ws.Range(ws.Cells(3, 2), ws.Cells(last, 10)).ClearContents
+    last = ws.Cells(ws.Rows.Count, 19).End(xlUp).Row
+    If last >= 36 Then ws.Range(ws.Cells(36, 19), ws.Cells(last, 27)).ClearContents
 
     ' Part stays text ("2/4" would otherwise turn into a date).
     stage = "write the tables"
-    wsS.Range(wsS.Cells(3, 4), wsS.Cells(2 + n1, 4)).NumberFormat = "@"
-    wsS.Range(wsS.Cells(36, 21), wsS.Cells(35 + n2, 21)).NumberFormat = "@"
-    wsS.Range(wsS.Cells(3, 2), wsS.Cells(2 + n1, 10)).Value = data1
-    wsS.Range(wsS.Cells(36, 19), wsS.Cells(35 + n2, 27)).Value = data2
+    ws.Range(ws.Cells(3, 4), ws.Cells(2 + n1, 4)).NumberFormat = "@"
+    ws.Range(ws.Cells(36, 21), ws.Cells(35 + n2, 21)).NumberFormat = "@"
+    ws.Range(ws.Cells(3, 2), ws.Cells(2 + n1, 10)).Value = data1
+    ws.Range(ws.Cells(36, 19), ws.Cells(35 + n2, 27)).Value = data2
 
     stage = "extend the helper formulas"
-    last = wsS.Cells(wsS.Rows.Count, 12).End(xlUp).Row
+    last = ws.Cells(ws.Rows.Count, 12).End(xlUp).Row
     If last < 2 + n1 And last >= 3 Then
-        wsS.Range(wsS.Cells(3, 12), wsS.Cells(3, 15)).AutoFill _
-            Destination:=wsS.Range(wsS.Cells(3, 12), wsS.Cells(2 + n1, 15))
+        ws.Range(ws.Cells(3, 12), ws.Cells(3, 15)).AutoFill _
+            Destination:=ws.Range(ws.Cells(3, 12), ws.Cells(2 + n1, 15))
     End If
-    last = wsS.Cells(wsS.Rows.Count, 29).End(xlUp).Row
+    last = ws.Cells(ws.Rows.Count, 29).End(xlUp).Row
     If last < 35 + n2 And last >= 36 Then
-        wsS.Range(wsS.Cells(36, 29), wsS.Cells(36, 32)).AutoFill _
-            Destination:=wsS.Range(wsS.Cells(36, 29), wsS.Cells(35 + n2, 32))
+        ws.Range(ws.Cells(36, 29), ws.Cells(36, 32)).AutoFill _
+            Destination:=ws.Range(ws.Cells(36, 29), ws.Cells(35 + n2, 32))
     End If
 
     Application.Calculation = calcMode
     Application.ScreenUpdating = True
     Exit Function
 
+    ' A half-written table would mix the previous results with SAP's - leave
+    ' both empty instead.
 Failed:
     PutResultsSheet = stage & ": VBA error " & Err.Number & " - " & Err.Description & _
                       " - " & RESULT_SHEET_NAME & "'s tables were left empty."
     On Error Resume Next
-    Application.CutCopyMode = False
-    If Not wsS Is Nothing Then
-        wsS.Range(wsS.Cells(3, 2), wsS.Cells(wsS.Rows.Count, 10)).ClearContents
-        wsS.Range(wsS.Cells(36, 19), wsS.Cells(wsS.Rows.Count, 27)).ClearContents
-    End If
+    ws.Range(ws.Cells(3, 2), ws.Cells(ws.Rows.Count, 10)).ClearContents
+    ws.Range(ws.Cells(36, 19), ws.Cells(ws.Rows.Count, 27)).ClearContents
     Application.Calculation = calcMode
     Application.ScreenUpdating = True
 
