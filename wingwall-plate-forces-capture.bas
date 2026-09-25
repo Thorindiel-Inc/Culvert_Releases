@@ -28,14 +28,14 @@ Option Explicit
 ' hand, so the file in the repo and the code actually running can silently
 ' diverge - check this stamp matches the constant here before concluding
 ' anything from a run. Bump it whenever this file changes.
-Private Const SCRIPT_VERSION As String = "2026-09-25a"
+Private Const SCRIPT_VERSION As String = "2026-09-25b"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Calculation always goes back to Automatic at the end (it used to restore the starting mode, so one interrupted run left Excel on Manual for good)"
+Private Const SCRIPT_CHANGELOG As String = "Six more captures (STR TML Fx, STR TML Mx, EQ TML Fx, EQ TML Mx Mak, SER TML Fx, SER TML Mx); shear (V) pictures of the foundation now in local axes instead of the FOUND UCS."
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -89,7 +89,8 @@ Private Const TARGET_SHEET_NAME As String = "4_SONUC"
 '                "Vxx" "Vyy" "VMax" "Wood Armer Moment" "Fvector" "Mvector"
 '                (reported in the coordinate system CoordSystemForShape
 '                picks for the row - "dvr" rows Local element axes, "tml"
-'                rows the named UCS "FOUND". See the LOCAL_UCS_TYPE_* block.)
+'                rows the named UCS "FOUND", except shear (V...) components,
+'                which are always Local. See the LOCAL_UCS_TYPE_* block.)
 '   ShapeName  : encodes both the Picture/Shape name AND which element list
 '                to activate - "dvr" (Duvar/wall) rows use ELEMENT_LIST_WALL,
 '                "tml" (Temel/foundation) rows use ELEMENT_LIST_FOUND, per
@@ -103,19 +104,25 @@ Private Const JOB_LIST As String = _
     "ULS|CB|All|Mxx|str_dvr_mx;" & _
     "ULS|CB|All|Vxx|str_dvr_vx;" & _
     "ULS|CB|All|Fyy|str_tml_fy;" & _
+    "ULS|CB|All|Fxx|str_tml_fx;" & _
     "ULS|CB|All|Myy|str_tml_my;" & _
+    "ULS|CB|All|Mxx|str_tml_mx;" & _
     "ULS|CB|All|Vyy|str_tml_vy;" & _
     "ENV_EQ|CB|All|Fxx|eq_dvr_fx;" & _
     "ENV_EQ|CB|Min|Mxx|eq_dvr_mx;" & _
     "ENV_EQ|CB|All|Vxx|eq_dvr_vx;" & _
     "ENV_EQ|CB|All|Fyy|eq_tml_fy;" & _
+    "ENV_EQ|CB|All|Fxx|eq_tml_fx;" & _
     "ENV_EQ|CB|Min|Myy|eq_tml_my_min;" & _
     "ENV_EQ|CB|Max|Myy|eq_tml_my_mak;" & _
+    "ENV_EQ|CB|Max|Mxx|eq_tml_mx_mak;" & _
     "ENV_EQ|CB|All|Vyy|eq_tml_vy;" & _
     "SLS|CB|All|Fxx|ser_dvr_fx;" & _
     "SLS|CB|All|Mxx|ser_dvr_mx;" & _
     "SLS|CB|All|Fyy|ser_tml_fy;" & _
-    "SLS|CB|All|Myy|ser_tml_my"
+    "SLS|CB|All|Fxx|ser_tml_fx;" & _
+    "SLS|CB|All|Myy|ser_tml_my;" & _
+    "SLS|CB|All|Mxx|ser_tml_mx"
 
 ' STEP_INDEX is Required per the doc's spec table, but is only meaningful
 ' for Construction Stage ("CS") load cases - 1 is the safe default for the
@@ -131,6 +138,9 @@ Private Const STEP_INDEX_DEFAULT As Long = 1
 '
 ' WALL rows stay Local: a stem plate's own axes follow the wall face, which
 ' is the natural way to read its forces.
+'
+' SHEAR (Vxx/Vyy/VMax) is Local on every row, foundation included (owner,
+' 2026-09-25) - the UCS applies to the foundation's F and M rows only.
 '
 ' FOUNDATION rows use the UCS, because local axes are NOT comparable across
 ' the foundation. Local x runs node1 -> node2, and the five strips are wound
@@ -155,11 +165,12 @@ Private Const STEP_INDEX_DEFAULT As Long = 1
 '
 ' Intended orientation (owner, 2026-09-22): the wall that lies on the global
 ' X axis - the LEFT wingwall - rotated by that wall's own splay angle
-' (INPUT!C22). Nothing here computes or checks that; it is what should be
+' (INPUT!C22). Since wingwall builder 2026-09-25a the angle is INPUT!B25. Nothing here computes or checks that; it is what should be
 ' set up in Civil NX, recorded so the pictures can be read later.
 Private Const LOCAL_UCS_TYPE_DVR As String = "Local"
 Private Const LOCAL_UCS_TYPE_TML As String = "UCS"
 Private Const LOCAL_UCS_TYPE_OTHER As String = "Local"
+Private Const LOCAL_UCS_TYPE_SHEAR As String = "Local"
 ' The name midas-wingwall-model-build.bas gives the UCS at db/NUCS.
 Private Const UCS_NAME_FOR_RESULTS As String = "FOUND"
 
@@ -716,10 +727,13 @@ Private Function ElementListForShape(ByVal shapeName As String) As String
 End Function
 
 ' "Local" or "UCS" for this job - same "dvr"/"tml" split as the element list
-' above. See the LOCAL_UCS_TYPE_* block for why the foundation differs.
-Private Function CoordSystemForShape(ByVal shapeName As String) As String
+' above, except that a shear component (Vxx/Vyy/VMax) is always Local. See
+' the LOCAL_UCS_TYPE_* block for why the foundation differs.
+Private Function CoordSystemForShape(ByVal shapeName As String, ByVal compName As String) As String
 
-    If InStr(1, shapeName, "dvr", vbTextCompare) > 0 Then
+    If StrComp(Left$(compName, 1), "V", vbTextCompare) = 0 Then
+        CoordSystemForShape = LOCAL_UCS_TYPE_SHEAR
+    ElseIf InStr(1, shapeName, "dvr", vbTextCompare) > 0 Then
         CoordSystemForShape = LOCAL_UCS_TYPE_DVR
     ElseIf InStr(1, shapeName, "tml", vbTextCompare) > 0 Then
         CoordSystemForShape = LOCAL_UCS_TYPE_TML
@@ -806,12 +820,13 @@ Private Function BuildCaptureBody(ByVal exportPath As String, _
     b = b & "},"
 
     ' plate force options - coordinate system + averaging method. The
-    ' coordinate system is per job: wall rows Local, foundation rows UCS
-    ' (see CoordSystemForShape and the LOCAL_UCS_TYPE_* block).
+    ' coordinate system is per job: wall rows Local, foundation rows UCS,
+    ' shear always Local (see CoordSystemForShape and the LOCAL_UCS_TYPE_*
+    ' block).
     b = b & """OPTIONS"": {"
     b = b & """LOCAL_UCS"": {"
-    b = b & """TYPE"": """ & CoordSystemForShape(job.shapeName) & """"
-    If StrComp(CoordSystemForShape(job.shapeName), "UCS", vbTextCompare) = 0 Then
+    b = b & """TYPE"": """ & CoordSystemForShape(job.shapeName, job.CompName) & """"
+    If StrComp(CoordSystemForShape(job.shapeName, job.CompName), "UCS", vbTextCompare) = 0 Then
         b = b & ","
         b = b & """UCS_NAME"": """ & UCS_NAME_FOR_RESULTS & """"
     End If

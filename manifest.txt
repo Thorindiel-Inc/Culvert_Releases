@@ -11,4 +11,4 @@ sap2000-wingwall-model-build|2026-09-25a|Foundation area local axes are turned b
 wingwall-displacement-contour-capture|2026-09-25a|Calculation always goes back to Automatic at the end (it used to restore the starting mode, so one interrupted run left Excel on Manual for good)
 wingwall-load-diagram-capture|2026-09-25a|Calculation always goes back to Automatic at the end (it used to restore the starting mode, so one interrupted run left Excel on Manual for good)
 wingwall-model-build|2026-09-25a|Named UCS FOUND is rotated by the new INPUT!B25 angle instead of the LEFT wall angle C22 (blank or non-number B25 stops the build).
-wingwall-plate-forces-capture|2026-09-25a|Calculation always goes back to Automatic at the end (it used to restore the starting mode, so one interrupted run left Excel on Manual for good)
+wingwall-plate-forces-capture|2026-09-25b|Six more captures (STR TML Fx, STR TML Mx, EQ TML Fx, EQ TML Mx Mak, SER TML Fx, SER TML Mx); shear (V) pictures of the foundation now in local axes instead of the FOUND UCS.
