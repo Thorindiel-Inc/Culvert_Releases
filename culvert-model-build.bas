@@ -28,14 +28,14 @@ Option Explicit
 ' so a screenshot of a run does not otherwise say which build produced it -
 ' bump this whenever the file changes and check it matches before
 ' diagnosing anything from a report.
-Private Const SCRIPT_VERSION As String = "2026-09-24b"
+Private Const SCRIPT_VERSION As String = "2026-09-24c"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "kh (MIDAS_INPUT!B15) = 0 or blank with the seismic gate on no longer fails: the ATA load case is kept without its self-weight (MIDAS rejected an all-zero one)."
+Private Const SCRIPT_CHANGELOG As String = "INPUT!B26 = YOK builds without live load: no LL, LLin, LLacc, LSS2_L, LSA2_L cases or loads, their terms left out of the combinations, no ACC-1 (LL1 and LSS1_L stay)."
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -286,6 +286,32 @@ Private SEISMIC_GATE_SOURCE As String
 Private SEISMIC_GATE_KNOWN As Boolean
 
 ' ---------------------------------------------------------------------------
+'  LIVE-LOAD GATE - INPUT!B26 ("HAREKETLI YUK", a dropdown LM71 / H30S24 /
+'  YOK) switches the whole live-load chain on or off, modelled on the
+'  seismic gate above. MIDAS_INPUT's LL cells are formulas keyed off this
+'  same cell (=IF(INPUT!B26="LM71", ..., H30S24 value)), so with YOK they
+'  are NOT zero - the gate has to live in code, not in the numbers.
+'
+'  Trimmed, case-insensitive: "YOK" -> OFF. Blank or anything else -> ON.
+'  An error value in B26 stops the build, same as RequirePositive/
+'  BadOptionalCell - a broken formula there should never silently build
+'  WITH live load.
+'
+'  When FALSE, dropped entirely:
+'    db/STLD    no LL, LLin, LLacc, LSS2_L, LSA2_L cases (PostStaticLoadCases)
+'    db/BMLD    no LL, LLin, LLacc, LSS2_L, LSA2_L loads     (AddLoad)
+'    db/LCOM    those cases' terms left out of every SLS-*/ULS-*
+'               combination; ACC-1 dropped entirely  (AddCombo /
+'               GenerateLoadCombinations)
+'  LL1 and LSS1_L are NOT live-load cases here - the owner keeps them on
+'  regardless of this gate (2026-09-24).
+' ---------------------------------------------------------------------------
+Private LIVE_LOAD_ACTIVE As Boolean
+' Where the gate's value came from, for the build report (e.g.
+' "INPUT!B26 = ""YOK""").
+Private LIVE_LOAD_GATE_SOURCE As String
+
+' ---------------------------------------------------------------------------
 '  PROGRESS BAR
 '
 '  Drawn in Excel's status bar rather than a UserForm, so this module stays
@@ -371,7 +397,9 @@ Private WALL_E As Long            ' first of the 8 wall elements (always 8)
 
 ' The 20 static load cases, in the MCT module's own order. The last two
 ' (EQ, ATA) are the seismic pair and are dropped when SEISMIC_ACTIVE is
-' False - see IsSeismicCase.
+' False - see IsSeismicCase. LL, LLin, LLacc, LSS2_L, LSA2_L are the
+' live-load ones and are dropped when LIVE_LOAD_ACTIVE is False - see
+' IsLiveLoadCase. Gate OFF: 13 cases non-seismic, 15 seismic.
 Private Const STLDCASE_LIST As String = _
     "DL|D;EV1|EV;EV2|EV;EVin|EV;EHS1|EH;EHA1|EH;EHS2_L|EH;EHA2_L|EH;" & _
     "EHS2_R|EH;EHA2_R|EH;LL1|L;LL|L;LLin|L;LLacc|E;LSS1_L|LS;LSS2_L|LS;" & _
@@ -469,6 +497,59 @@ Private Function DetectSeismicGate() As Boolean
 
 End Function
 
+' Reads INPUT!B26 and sets LIVE_LOAD_ACTIVE/LIVE_LOAD_GATE_SOURCE. Returns
+' "" when the cell could be evaluated, otherwise a message naming it - an
+' error value there stops the build, same pattern as RequirePositive.
+Private Function InitLiveLoadGate() As String
+
+    Dim ws As Worksheet
+    Dim v As Variant
+    Dim s As String
+
+    InitLiveLoadGate = ""
+    ' Reset every run - module-level values survive between runs.
+    LIVE_LOAD_ACTIVE = True
+    LIVE_LOAD_GATE_SOURCE = ""
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(PROJECT_SHEET_NAME)
+    On Error GoTo 0
+
+    If ws Is Nothing Then
+        LIVE_LOAD_ACTIVE = True
+        LIVE_LOAD_GATE_SOURCE = "sheet """ & PROJECT_SHEET_NAME & """ not found, defaulted to ON"
+        Exit Function
+    End If
+
+    v = ws.Range("B26").Value
+
+    If IsError(v) Then
+        InitLiveLoadGate = PROJECT_SHEET_NAME & "!B26 (HAREKETLI YUK) is an error value. " & _
+                           "Fix the formula, or set it to a valid option or blank."
+        Exit Function
+    End If
+
+    s = Trim$(CStr(v))
+
+    If StrComp(s, "YOK", vbTextCompare) = 0 Then
+        LIVE_LOAD_ACTIVE = False
+        LIVE_LOAD_GATE_SOURCE = PROJECT_SHEET_NAME & "!B26 = ""YOK"""
+    Else
+        LIVE_LOAD_ACTIVE = True
+        LIVE_LOAD_GATE_SOURCE = PROJECT_SHEET_NAME & "!B26 = " & _
+                                IIf(Len(s) = 0, "(blank)", """" & s & """")
+    End If
+
+End Function
+
+' The live-load cases dropped entirely when LIVE_LOAD_ACTIVE is False. LL1
+' and LSS1_L are deliberately NOT here - the owner keeps them on regardless
+' (2026-09-24).
+Private Function IsLiveLoadCase(ByVal nm As String) As Boolean
+    IsLiveLoadCase = (nm = "LL" Or nm = "LLin" Or nm = "LLacc" Or _
+                      nm = "LSS2_L" Or nm = "LSA2_L")
+End Function
+
 
 ' ===========================================================================
 '  ENTRY POINTS
@@ -480,6 +561,7 @@ Sub BuildCulvertModel()
     Dim cleanReport As String
     Dim ok As Boolean
     Dim vLcom As String, vStld As String
+    Dim liveLoadErr As String
 
     Call InitSeismicGate
 
@@ -502,6 +584,24 @@ Sub BuildCulvertModel()
     Else
         report = report & "NOTE - seismic gate is OFF (" & SEISMIC_GATE_SOURCE & "): no EQ/ATA " & _
                  "cases or loads." & vbCrLf & String(40, "-") & vbCrLf
+    End If
+
+    liveLoadErr = InitLiveLoadGate()
+
+    ' Stop before anything is deleted or written - same reasoning as the
+    ' seismic gate above.
+    If Len(liveLoadErr) > 0 Then
+        MsgBox report & "STOPPED - nothing was changed in the model." & vbCrLf & vbCrLf & _
+               liveLoadErr, vbExclamation
+        Exit Sub
+    End If
+
+    If LIVE_LOAD_ACTIVE Then
+        report = report & "NOTE - live load is ON (" & LIVE_LOAD_GATE_SOURCE & ")." & _
+                 vbCrLf & String(40, "-") & vbCrLf
+    Else
+        report = report & "NOTE - live load is OFF (" & LIVE_LOAD_GATE_SOURCE & "): no LL/LLin/" & _
+                 "LLacc/LSS2_L/LSA2_L cases or loads, no ACC-1." & vbCrLf & String(40, "-") & vbCrLf
     End If
 
     ' Wipe first, so every PUT below lands in an empty endpoint and the
@@ -948,6 +1048,8 @@ Private Function ReadInputs() As String
     On Error GoTo 0
 
     Call InitSeismicGate
+    ReadInputs = InitLiveLoadGate()
+    If Len(ReadInputs) > 0 Then Exit Function
 
     If ws Is Nothing Then
         ReadInputs = "Sheet """ & INPUT_SHEET_NAME & """ not found."
@@ -1552,6 +1654,10 @@ Private Sub AddLoad(ByVal elemNo As Long, ByVal lcname As String, ByVal cmd As S
     ' nothing; its neighbours already span the whole height/length.
     If Not ElementExists(elemNo) Then Exit Sub
 
+    ' Live load off: LL/LLin/LLacc/LSS2_L/LSA2_L carry nothing. LL1 and
+    ' LSS1_L are not live-load cases here and are unaffected.
+    If Not LIVE_LOAD_ACTIVE And IsLiveLoadCase(lcname) Then Exit Sub
+
     If Len(BEAMLOAD_LIST) > 0 Then BEAMLOAD_LIST = BEAMLOAD_LIST & ";"
 
     BEAMLOAD_LIST = BEAMLOAD_LIST & elemNo & "|" & lcname & "|" & cmd & "|" & loadDir & _
@@ -1570,10 +1676,17 @@ End Function
 '  LOAD COMBINATIONS - fixed set, transcribed from the sheet's old
 '  *LOADCOMB block. Nothing is read from the worksheet any more.
 '
-'  35 combinations (33 when SEISMIC_ACTIVE is False - no EQ-1, no ENV_EQ):
+'  35 combinations (33 when SEISMIC_ACTIVE is False - no EQ-1, no ENV_EQ;
+'  34 when LIVE_LOAD_ACTIVE is False - no ACC-1; 32 when both are False).
+'  Every SLS-*/ULS-* combination keeps its name and place either way -
+'  AddCombo strips out the terms of any "ST" pair whose case
+'  IsLiveLoadCase when the gate is off (e.g. SLS-7 becomes DL,EV2,
+'  EHS2_L,EHS2_R with live load off; SLS-1 keeps LL1 and LSS1_L, which are
+'  not live-load cases):
 '    SLS-1..14   serviceability, factors 1.0 / 0.5
 '    ULS-1..14   ultimate, 1.35 permanent / 1.5 / 1.45 / 0.75
-'    ACC-1       accidental (LLacc) - NOT seismic, always built
+'    ACC-1       accidental (LLacc) - NOT seismic, dropped entirely when
+'                LIVE_LOAD_ACTIVE is False (LLacc is its only load)
 '    EQ-1        seismic (EQ lateral pressure only, no ATA inertia) -
 '                only when SEISMIC_ACTIVE
 '    ENV_SER     envelope of all SLS
@@ -1635,7 +1748,10 @@ Private Sub GenerateLoadCombinations()
 
     ' --- Accidental and seismic ---
     ' ACC-1 is an accidental (impact) case, not a seismic one, so it is
-    ' built regardless. EQ-1 goes only when the seismic gate is on.
+    ' gated on LIVE_LOAD_ACTIVE, not SEISMIC_ACTIVE - LLacc is its only
+    ' load, so with live load off it would be DL,EV2,EHA2_L,EHA2_R alone,
+    ' the same as SLS-6, and is dropped entirely instead (owner's
+    ' decision, 2026-09-24). EQ-1 goes only when the seismic gate is on.
     '
     ' EQ-1 deliberately does NOT reference ATA (by request, 2026-09-23) -
     ' only the EQ lateral earth pressure case. ATA is still built as a
@@ -1643,7 +1759,9 @@ Private Sub GenerateLoadCombinations()
     ' inertia record (db/BODF) whenever SEISMIC_ACTIVE, per the
     ' SEISMIC GATE block above - it is simply not pulled into any
     ' combination any more, EQ-1 or otherwise.
-    Call AddCombo("ACC-1", 0, "ST", "DL:1,EV2:1,EHA2_L:1,EHA2_R:1,LLacc:1", 1)
+    If LIVE_LOAD_ACTIVE Then
+        Call AddCombo("ACC-1", 0, "ST", "DL:1,EV2:1,EHA2_L:1,EHA2_R:1,LLacc:1", 1)
+    End If
     If SEISMIC_ACTIVE Then
         Call AddCombo("EQ-1", 0, "ST", "DL:1,EV2:1,EHA2_L:1,EHA2_R:1,EQ:1", 1)
     End If
@@ -1696,8 +1814,14 @@ Private Sub AddCombo(ByVal nm As String, ByVal iType As Long, _
 
     For i = LBound(pairs) To UBound(pairs)
         kv = Split(pairs(i), ":")
-        factors = factors & IIf(i > LBound(pairs), ",", "") & _
-                  anal & ":" & kv(0) & ":" & kv(1)
+        ' Live load off: drop this pair from every "ST" combination that
+        ' references a live-load case, so SLS-*/ULS-*/ACC-1 keep their
+        ' names and every other term, just without that one - centralised
+        ' here so no individual combination needs its own gate.
+        If Not (anal = "ST" And Not LIVE_LOAD_ACTIVE And IsLiveLoadCase(kv(0))) Then
+            factors = factors & IIf(Len(factors) > 0, ",", "") & _
+                      anal & ":" & kv(0) & ":" & kv(1)
+        End If
     Next i
 
     If Len(LOADCOMB_LIST) > 0 Then LOADCOMB_LIST = LOADCOMB_LIST & ";"
@@ -1913,9 +2037,11 @@ Private Function PostStaticLoadCases() As String
 
     For i = LBound(rows) To UBound(rows)
         f = Split(rows(i), "|")
-        ' Skipping EQ/ATA uses a running key rather than i+1, so the
-        ' remaining cases still come out numbered 1..n with no holes.
-        If SEISMIC_ACTIVE Or Not IsSeismicCase(f(0)) Then
+        ' Skipping EQ/ATA and/or the live-load cases uses a running key rather
+        ' than i+1, so the remaining cases still come out numbered 1..n
+        ' with no holes.
+        If (SEISMIC_ACTIVE Or Not IsSeismicCase(f(0))) And _
+           (LIVE_LOAD_ACTIVE Or Not IsLiveLoadCase(f(0))) Then
             key = key + 1
             If key > 1 Then b = b & ","
             b = b & """" & key & """: {"
