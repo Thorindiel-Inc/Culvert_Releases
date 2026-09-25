@@ -49,10 +49,10 @@ Option Explicit
 ' ---------------------------------------------------------------------------
 
 ' Stamped into the report title and the file. Bump with every change.
-Private Const SCRIPT_VERSION As String = "2026-09-24d"
+Private Const SCRIPT_VERSION As String = "2026-09-25a"
 
 ' One line, no "_" continuation, no "|" - read by the updater's manifest.
-Private Const SCRIPT_CHANGELOG As String = "No change to the model: the SAP2000 API bridge it shares with the culvert builder can now run steps after the analysis (used by the culvert results pull)."
+Private Const SCRIPT_CHANGELOG As String = "Foundation area local axes are turned by the new INPUT!B25 angle (as the MIDAS FOUND UCS) instead of C22 (blank or non-number B25 stops the build)."
 
 ' Identifies this module to the updater whatever it was named in Excel.
 Private Const SCRIPT_ID As String = "sap2000-wingwall-model-build"
@@ -117,6 +117,8 @@ Private Const CELL_STEM_THICKNESS As String = "B21"
 Private Const CELL_FOUNDATION_THICKNESS As String = "B24"
 Private Const CELL_LEFT_LENGTH As String = "B22"
 Private Const CELL_LEFT_ANGLE As String = "C22"
+' Foundation area local-axes angle = the MIDAS builder's FOUND UCS angle.
+Private Const CELL_UCS_ANGLE As String = "B25"
 Private Const CELL_LEFT_HNEAR As String = "D22"
 Private Const CELL_LEFT_HFAR As String = "E22"
 Private Const CELL_RIGHT_LENGTH As String = "B23"
@@ -173,6 +175,7 @@ Private GEO_RIGHT_NEAR_X As Double, GEO_RIGHT_NEAR_Y As Double
 Private GEO_RIGHT_FAR_X As Double, GEO_RIGHT_FAR_Y As Double
 Private GEO_RIGHT_L As Double, GEO_RIGHT_HNEAR As Double, GEO_RIGHT_HFAR As Double
 Private GEO_LEFT_ANGLE_DEG As Double
+Private GEO_UCS_ANGLE_DEG As Double    ' INPUT!B25, read with the other inputs
 Private LOAD_L_ATREST(1 To 4) As Double
 Private LOAD_L_ACTIVE(1 To 4) As Double
 Private LOAD_L_SEISMIC(1 To 4) As Double
@@ -280,6 +283,7 @@ Public Sub BuildSap2000WingwallModel()
     If ok Then
         res = ReadWingwallInputs(openingWidth, foundT, stemT, leftSide, rightSide)
         If Len(res) = 0 Then res = ReadLoadInputs()
+        If Len(res) = 0 Then res = ReadUcsAngle()
         If Len(res) = 0 And Len(INPUT_FALLBACKS) > 0 Then
             res = "WARN: used built-in defaults -" & INPUT_FALLBACKS
         End If
@@ -412,6 +416,24 @@ Private Function ReadWingwallInputs(ByRef openingWidth As Double, ByRef foundati
     MESH_Y_FOUND = ReadCount(ws, CELL_MESH_Y_FOUND)
 
     ReadWingwallInputs = ""
+
+End Function
+
+' Reads INPUT!B25 (CELL_UCS_ANGLE) into GEO_UCS_ANGLE_DEG - the rotation of
+' the FOUND Named UCS, in degrees. "" on success or the error message.
+Private Function ReadUcsAngle() As String
+
+    Dim ws As Worksheet
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(INPUT_SHEET_NAME)
+    On Error GoTo 0
+    If ws Is Nothing Then
+        ReadUcsAngle = "Sheet not found: " & INPUT_SHEET_NAME
+        Exit Function
+    End If
+
+    ReadUcsAngle = RequireNumber(ws, CELL_UCS_ANGLE, "FOUND UCS angle", GEO_UCS_ANGLE_DEG)
 
 End Function
 
@@ -1492,17 +1514,17 @@ Private Sub WriteAreaLoadTables()
 
 End Sub
 
-' Local axes (foundation turned by the LEFT wall's angle, like the MIDAS
-' "FOUND" UCS and the example), sections, and the vertical springs: kv
+' Local axes (foundation turned by INPUT!B25, the angle of the MIDAS
+' "FOUND" UCS; the example used the LEFT wall's angle C22), sections, and the vertical springs: kv
 ' normal to every foundation area, as the example writes them.
 Private Sub WriteAreaTables(ByVal foundT As Double, ByVal stemT As Double)
 
     Dim a As Long
 
-    If GEO_LEFT_ANGLE_DEG <> 0 Then
+    If GEO_UCS_ANGLE_DEG <> 0 Then
         Call TableStart("AREA LOCAL AXES ASSIGNMENTS 1 - TYPICAL")
         For a = 1 To AR_COUNT
-            If AR_KIND(a) = 0 Then Call Emit("   Area=" & a & "   Angle=" & SapNum(GEO_LEFT_ANGLE_DEG))
+            If AR_KIND(a) = 0 Then Call Emit("   Area=" & a & "   Angle=" & SapNum(GEO_UCS_ANGLE_DEG))
         Next a
         Call TableEnd
     End If

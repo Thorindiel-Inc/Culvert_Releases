@@ -7,7 +7,7 @@ culvert-load-diagram-capture|2026-09-25a|Calculation always goes back to Automat
 culvert-model-build|2026-09-24c|INPUT!B26 = YOK builds without live load: no LL, LLin, LLacc, LSS2_L, LSA2_L cases or loads, their terms left out of the combinations, no ACC-1 (LL1 and LSS1_L stay).
 macro-updater|2026-09-24a|Recognises a password-locked VBA project and says how to unlock it for the session, instead of pointing at the Trust Center setting.
 sap2000-culvert-model-build|2026-09-25a|Calculation always goes back to Automatic at the end (it used to restore the starting mode, so one interrupted run left Excel on Manual for good)
-sap2000-wingwall-model-build|2026-09-24d|No change to the model: the SAP2000 API bridge it shares with the culvert builder can now run steps after the analysis (used by the culvert results pull).
+sap2000-wingwall-model-build|2026-09-25a|Foundation area local axes are turned by the new INPUT!B25 angle (as the MIDAS FOUND UCS) instead of C22 (blank or non-number B25 stops the build).
 wingwall-displacement-contour-capture|2026-09-25a|Calculation always goes back to Automatic at the end (it used to restore the starting mode, so one interrupted run left Excel on Manual for good)
 wingwall-load-diagram-capture|2026-09-25a|Calculation always goes back to Automatic at the end (it used to restore the starting mode, so one interrupted run left Excel on Manual for good)
 wingwall-model-build|2026-09-25a|Named UCS FOUND is rotated by the new INPUT!B25 angle instead of the LEFT wall angle C22 (blank or non-number B25 stops the build).
