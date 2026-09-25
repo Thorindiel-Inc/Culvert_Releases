@@ -10,5 +10,5 @@ sap2000-culvert-model-build|2026-09-25a|Calculation always goes back to Automati
 sap2000-wingwall-model-build|2026-09-24d|No change to the model: the SAP2000 API bridge it shares with the culvert builder can now run steps after the analysis (used by the culvert results pull).
 wingwall-displacement-contour-capture|2026-09-25a|Calculation always goes back to Automatic at the end (it used to restore the starting mode, so one interrupted run left Excel on Manual for good)
 wingwall-load-diagram-capture|2026-09-25a|Calculation always goes back to Automatic at the end (it used to restore the starting mode, so one interrupted run left Excel on Manual for good)
-wingwall-model-build|2026-09-23f|Audit rev 2: required dimensions must be present and above 0, wall heights must clear the rigid zone, Ec fallback is reported as a WARN, long timeout for doc/ANAL, verdict first in the report, MAPI key re-read every run.
+wingwall-model-build|2026-09-25a|Named UCS FOUND is rotated by the new INPUT!B25 angle instead of the LEFT wall angle C22 (blank or non-number B25 stops the build).
 wingwall-plate-forces-capture|2026-09-25a|Calculation always goes back to Automatic at the end (it used to restore the starting mode, so one interrupted run left Excel on Manual for good)

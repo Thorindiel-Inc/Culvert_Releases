@@ -30,14 +30,14 @@ Option Explicit
 ' and the code actually running can silently diverge, and a fix that
 ' looks ineffective is very often just not re-imported yet. Check this
 ' matches before diagnosing anything from a report screenshot.
-Private Const SCRIPT_VERSION As String = "2026-09-23f"
+Private Const SCRIPT_VERSION As String = "2026-09-25a"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Audit rev 2: required dimensions must be present and above 0, wall heights must clear the rigid zone, Ec fallback is reported as a WARN, long timeout for doc/ANAL, verdict first in the report, MAPI key re-read every run."
+Private Const SCRIPT_CHANGELOG As String = "Named UCS FOUND is rotated by the new INPUT!B25 angle instead of the LEFT wall angle C22 (blank or non-number B25 stops the build)."
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -366,10 +366,12 @@ Private SPRING_KV As Double
 '  apart. A single UCS gives one grid for the whole slab.
 '
 '  Orientation, per the owner: origin at the global origin (node 7), X
-'  rotated by the LEFT wall's own splay angle - the LEFT wall lies on global
-'  +X, so rotating by C22 puts UCS x at that angle and UCS y at 90 + C22,
-'  which is exactly along the culvert face A->B. So the foundation reads
-'  "along the face" and "across the face".
+'  rotated by its own angle, INPUT!B25 (CELL_UCS_ANGLE, owner 2026-09-25).
+'  It used to be the LEFT wall's splay angle C22 - the LEFT wall lies on
+'  global +X, so rotating by C22 puts UCS x at that angle and UCS y at
+'  90 + C22, exactly along the culvert face A->B; B25 = C22 reproduces that.
+'  B25 must be a number (0 is fine); blank/text stops the build before
+'  anything is written.
 '
 '      VX = ( cos a,  sin a, 0)      VY = (-sin a,  cos a, 0)
 '
@@ -390,7 +392,9 @@ Private SPRING_KV As Double
 '  "CurrentUCS"/"Local").
 ' ---------------------------------------------------------------------------
 Private Const UCS_NAME As String = "FOUND"
+Private Const CELL_UCS_ANGLE As String = "B25"
 Private GEO_LEFT_ANGLE_DEG As Double
+Private GEO_UCS_ANGLE_DEG As Double    ' INPUT!B25, read by PostGeometrySetup
 
 ' ---------------------------------------------------------------------------
 '  ELEMENT LISTS written BACK to the INPUT sheet after the build. The
@@ -1041,6 +1045,15 @@ Private Function PostGeometrySetup() As String
         Exit Function
     End If
 
+    ' The FOUND UCS angle, also read before anything posts. Not in
+    ' ReadWingwallInputs: that one is copied byte for byte into the SAP2000
+    ' wingwall builder.
+    errMsg = ReadUcsAngle()
+    If Len(errMsg) > 0 Then
+        PostGeometrySetup = errMsg
+        Exit Function
+    End If
+
     GenerateGeometry openingWidth, THICKNESS_STEM_VALUE, leftSide, rightSide
 
     If Len(INPUT_FALLBACKS) > 0 Then
@@ -1048,6 +1061,24 @@ Private Function PostGeometrySetup() As String
     Else
         PostGeometrySetup = ""
     End If
+
+End Function
+
+' Reads INPUT!B25 (CELL_UCS_ANGLE) into GEO_UCS_ANGLE_DEG - the rotation of
+' the FOUND Named UCS, in degrees. "" on success or the error message.
+Private Function ReadUcsAngle() As String
+
+    Dim ws As Worksheet
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(INPUT_SHEET_NAME)
+    On Error GoTo 0
+    If ws Is Nothing Then
+        ReadUcsAngle = "Sheet not found: " & INPUT_SHEET_NAME
+        Exit Function
+    End If
+
+    ReadUcsAngle = RequireNumber(ws, CELL_UCS_ANGLE, "FOUND UCS angle", GEO_UCS_ANGLE_DEG)
 
 End Function
 
@@ -2094,15 +2125,15 @@ End Function
 
 ' Writes the foundation's coordinate system - see the db/NUCS block for the
 ' orientation and for what is confirmed vs still open. Origin at the global
-' origin, X rotated by the LEFT wall's splay angle, Y perpendicular to it in
-' plan, so Y lands along the culvert face.
+' origin, X rotated by INPUT!B25 (GEO_UCS_ANGLE_DEG), Y perpendicular to it
+' in plan.
 Private Function PostNamedUcs() As String
 
     Dim b As String
     Dim a As Double
     Dim cs As Double, sn As Double
 
-    a = DegToRad(GEO_LEFT_ANGLE_DEG)
+    a = DegToRad(GEO_UCS_ANGLE_DEG)
     cs = Cos(a)
     sn = Sin(a)
 
