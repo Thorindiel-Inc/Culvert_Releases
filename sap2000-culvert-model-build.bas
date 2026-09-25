@@ -59,10 +59,10 @@ Option Explicit
 ' ---------------------------------------------------------------------------
 
 ' Stamped into the report title. Bump with every change to this file.
-Private Const SCRIPT_VERSION As String = "2026-09-24g"
+Private Const SCRIPT_VERSION As String = "2026-09-25a"
 
 ' One line, no "_" continuation, no "|" - read by the updater's manifest.
-Private Const SCRIPT_CHANGELOG As String = "INPUT!B26 = YOK builds without live load: no LL, LLin, LLacc, LSS2_L, LSA2_L cases or loads, their terms left out of the combinations, no ACC-1 (LL1 and LSS1_L stay)."
+Private Const SCRIPT_CHANGELOG As String = "Calculation always goes back to Automatic at the end (it used to restore the starting mode, so one interrupted run left Excel on Manual for good)"
 
 ' Identifies this module to the updater whatever it was named in Excel.
 Private Const SCRIPT_ID As String = "sap2000-culvert-model-build"
@@ -1676,7 +1676,6 @@ End Function
 Private Function PutResultsSheet(ByRef data1() As Variant, ByRef data2() As Variant) As String
 
     Dim ws As Worksheet
-    Dim calcMode As Long
     Dim last As Long, n1 As Long, n2 As Long
     Dim stage As String
 
@@ -1690,7 +1689,6 @@ Private Function PutResultsSheet(ByRef data1() As Variant, ByRef data2() As Vari
 
     n1 = UBound(data1, 1)
     n2 = UBound(data2, 1)
-    calcMode = Application.Calculation
 
     On Error GoTo Failed
     Application.ScreenUpdating = False
@@ -1721,7 +1719,7 @@ Private Function PutResultsSheet(ByRef data1() As Variant, ByRef data2() As Vari
             Destination:=ws.Range(ws.Cells(36, 29), ws.Cells(35 + n2, 32))
     End If
 
-    Application.Calculation = calcMode
+    Application.Calculation = xlCalculationAutomatic
     Application.ScreenUpdating = True
     Exit Function
 
@@ -1733,7 +1731,7 @@ Failed:
     On Error Resume Next
     ws.Range(ws.Cells(3, 2), ws.Cells(ws.Rows.Count, 10)).ClearContents
     ws.Range(ws.Cells(36, 19), ws.Cells(ws.Rows.Count, 27)).ClearContents
-    Application.Calculation = calcMode
+    Application.Calculation = xlCalculationAutomatic
     Application.ScreenUpdating = True
 
 End Function

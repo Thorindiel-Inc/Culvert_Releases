@@ -27,14 +27,14 @@ Option Explicit
 ' hand, so the file in the repo and the code actually running can silently
 ' diverge - check this stamp matches the constant here before concluding
 ' anything from a run. Bump it whenever this file changes.
-Private Const SCRIPT_VERSION As String = "2026-09-23g"
+Private Const SCRIPT_VERSION As String = "2026-09-25a"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Audit rev 2: skips jobs whose load case or combination is not in the model, deletes the old JPEG before capturing, inserts the new picture before removing the old one, warns instead of aborting on a failed unit switch, re-reads the MAPI key every run, validates element lists, and puts failures first with a log file when the report is long."
+Private Const SCRIPT_CHANGELOG As String = "Calculation always goes back to Automatic at the end (it used to restore the starting mode, so one interrupted run left Excel on Manual for good)"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -167,7 +167,6 @@ Sub CaptureWingwallDisplacementContours()
     Dim origForce As String, origDist As String, origHeat As String, origTemper As String
     Dim unitsChanged As Boolean
     Dim unitWarn As String
-    Dim prevCalc As XlCalculation
     Dim fastMode As Boolean
     Dim report As String
 
@@ -232,7 +231,6 @@ Sub CaptureWingwallDisplacementContours()
     ' Every ReplacePictureByName deletes and re-adds a Shape, which forces
     ' two repaints and walks the workbook's formula graph each time. Armed
     ' only AFTER the error handler above, so any failure still restores.
-    prevCalc = Application.Calculation
     Application.ScreenUpdating = False
     Application.EnableEvents = False
     Application.Calculation = xlCalculationManual
@@ -258,7 +256,7 @@ Sub CaptureWingwallDisplacementContours()
 
     On Error GoTo 0
 
-    If fastMode Then Call EndFastMode(prevCalc)
+    If fastMode Then Call EndFastMode
 
     report = "Wingwall displacement contour capture  [" & SCRIPT_VERSION & "]" & vbCrLf & _
              RestoreUnitsAndReport(origForce, origDist, origHeat, origTemper) & vbCrLf
@@ -274,7 +272,7 @@ RestoreUnitsAndFail:
     Dim failMsg As String
     Dim restoreMsg As String
     failMsg = Err.Description
-    If fastMode Then Call EndFastMode(prevCalc)
+    If fastMode Then Call EndFastMode
     If unitsChanged Then
         restoreMsg = RestoreUnitsAndReport(origForce, origDist, origHeat, origTemper)
     Else
@@ -871,15 +869,18 @@ Private Function IsApiSuccess(ByVal statusCode As Long, ByVal responseText As St
 End Function
 
 
-' Puts Excel's screen updating, events and calculation back the way they
-' were. Called on BOTH the normal exit and the error handler - if this is
-' ever missed, the workbook is left with calculation switched off, which
-' looks exactly like corrupted results. On Error Resume Next so a failure
+' Turns Excel's screen updating and events back on and sets calculation to
+' AUTOMATIC - always, not "whatever it was at the start": a run cut short
+' (Esc, VBA Reset, a Civil NX dialog) never reaches this, and restoring the
+' starting mode then kept every later run on Manual too (owner, 2026-09-25).
+' Called on BOTH the normal exit and the error handler - if this is ever
+' missed, the workbook is left with calculation switched off, which looks
+' exactly like corrupted results. On Error Resume Next so a failure
 ' restoring one setting still lets the other two through.
-Private Sub EndFastMode(ByVal prevCalc As XlCalculation)
+Private Sub EndFastMode()
 
     On Error Resume Next
-    Application.Calculation = prevCalc
+    Application.Calculation = xlCalculationAutomatic
     Application.EnableEvents = True
     Application.ScreenUpdating = True
     ' Release the shared client; the next run builds a fresh one.
