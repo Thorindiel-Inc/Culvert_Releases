@@ -46,7 +46,7 @@ Option Explicit
 '      names them); combination names are kept exactly as in MIDAS
 '    - built through the API (2026-09-24), replacing the .$2k text file
 '  Ec is MIDAS_INPUT!B43, falling back to 33 GPa (EN C30/37, the reference's
-'  value) - NOT to the MIDAS builder's 26.291 GPa fallback.
+'  value) - the same fallback as the MIDAS culvert builder (since 2026-09-28).
 '
 '  No restraints are written: the foundation springs are the supports, as
 '  in the reference. Design-only data of the old text file (column rebar,
@@ -59,10 +59,10 @@ Option Explicit
 ' ---------------------------------------------------------------------------
 
 ' Stamped into the report title. Bump with every change to this file.
-Private Const SCRIPT_VERSION As String = "2026-09-25a"
+Private Const SCRIPT_VERSION As String = "2026-09-28a"
 
 ' One line, no "_" continuation, no "|" - read by the updater's manifest.
-Private Const SCRIPT_CHANGELOG As String = "Calculation always goes back to Automatic at the end (it used to restore the starting mode, so one interrupted run left Excel on Manual for good)"
+Private Const SCRIPT_CHANGELOG As String = "Comments only: the Ec fallback note now says both culvert builders use 33 GPa; no change in behaviour"
 
 ' Identifies this module to the updater whatever it was named in Excel.
 Private Const SCRIPT_ID As String = "sap2000-culvert-model-build"

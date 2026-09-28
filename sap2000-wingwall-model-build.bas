@@ -49,10 +49,10 @@ Option Explicit
 ' ---------------------------------------------------------------------------
 
 ' Stamped into the report title and the file. Bump with every change.
-Private Const SCRIPT_VERSION As String = "2026-09-25a"
+Private Const SCRIPT_VERSION As String = "2026-09-28a"
 
 ' One line, no "_" continuation, no "|" - read by the updater's manifest.
-Private Const SCRIPT_CHANGELOG As String = "Foundation area local axes are turned by the new INPUT!B25 angle (as the MIDAS FOUND UCS) instead of C22 (blank or non-number B25 stops the build)."
+Private Const SCRIPT_CHANGELOG As String = "EQ - 1 / EQ - 2 also carry the other wall's static active pressure (EHA2R / EHA2L), as the MIDAS wingwall builder."
 
 ' Identifies this module to the updater whatever it was named in Excel.
 Private Const SCRIPT_ID As String = "sap2000-wingwall-model-build"
@@ -204,8 +204,8 @@ Private Const STLDCASE_LIST As String = _
 Private Const LOADCOMB_LIST As String = _
     "SLS|ACTIVE|0|ST:DL:1,ST:EHS2_L:1,ST:EHS2_R:1,ST:LSS1_L:1,ST:LSS1_R:1|1;" & _
     "ULS|ACTIVE|0|ST:DL:1.35,ST:EHS2_L:1.35,ST:EHS2_R:1.35,ST:LSS1_L:1.45,ST:LSS1_R:1.45|1;" & _
-    "EQ - 1|ACTIVE|0|ST:DL:1,ST:EHA2_L:1,ST:EQ_L:1,ST:ATA_L:1|1;" & _
-    "EQ - 2|ACTIVE|0|ST:DL:1,ST:EHA2_R:1,ST:EQ_R:1,ST:ATA_R:1|1;" & _
+    "EQ - 1|ACTIVE|0|ST:DL:1,ST:EHA2_L:1,ST:EHA2_R:1,ST:EQ_L:1,ST:ATA_L:1|1;" & _
+    "EQ - 2|ACTIVE|0|ST:DL:1,ST:EHA2_L:1,ST:EHA2_R:1,ST:EQ_R:1,ST:ATA_R:1|1;" & _
     "ENV_SER|ACTIVE|1|CB:SLS:1|2;" & _
     "ENV_STR|ACTIVE|1|CB:ULS:1|2;" & _
     "ENV_EQ|ACTIVE|1|CB:EQ - 1:1,CB:EQ - 2:1|2;" & _

@@ -30,14 +30,14 @@ Option Explicit
 ' and the code actually running can silently diverge, and a fix that
 ' looks ineffective is very often just not re-imported yet. Check this
 ' matches before diagnosing anything from a report screenshot.
-Private Const SCRIPT_VERSION As String = "2026-09-25a"
+Private Const SCRIPT_VERSION As String = "2026-09-28a"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Named UCS FOUND is rotated by the new INPUT!B25 angle instead of the LEFT wall angle C22 (blank or non-number B25 stops the build)."
+Private Const SCRIPT_CHANGELOG As String = "EQ - 1 / EQ - 2 also carry the other wall's static active pressure (EHA2_R / EHA2_L); Excel calculation is Manual while the build writes cells and always Automatic at the end; the divide's G10/G11 element numbers are predicted instead of read back (6 fewer db/ELEM reads) and checked against the model before they are written."
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -316,12 +316,11 @@ Private Const DIVIDE_TABLE As String = _
 Private MESH_X_WALL As Long, MESH_Y_WALL As Long
 Private MESH_X_FOUND As Long, MESH_Y_FOUND As Long
 
-' Every element as it stood just before a tracked plate was divided, and
-' the non-rigid families accumulated by diffing against that snapshot.
-' See PostDivideElements.
-Private SNAP_IDS() As Long, SNAP_COUNT As Long
+' The non-rigid families (G10/G11), predicted while dividing, and the
+' highest element number the divide should leave. See PostDivideElements.
 Private NR_FOUND_IDS() As Long, NR_FOUND_COUNT As Long
 Private NR_WALL_IDS() As Long, NR_WALL_COUNT As Long
+Private PREDICTED_ELEM_MAX As Long
 
 ' Foundation and wall plates read back after the divide, shared by the
 ' element-list write-back and the surface springs so db/ELEM is fetched
@@ -541,8 +540,8 @@ Private LOAD_SEISMIC_COEF As Double
 Private Const LOADCOMB_LIST As String = _
     "SLS|ACTIVE|0|ST:DL:1,ST:EHS2_L:1,ST:EHS2_R:1,ST:LSS1_L:1,ST:LSS1_R:1|1;" & _
     "ULS|ACTIVE|0|ST:DL:1.35,ST:EHS2_L:1.35,ST:EHS2_R:1.35,ST:LSS1_L:1.45,ST:LSS1_R:1.45|1;" & _
-    "EQ - 1|ACTIVE|0|ST:DL:1,ST:EHA2_L:1,ST:EQ_L:1,ST:ATA_L:1|1;" & _
-    "EQ - 2|ACTIVE|0|ST:DL:1,ST:EHA2_R:1,ST:EQ_R:1,ST:ATA_R:1|1;" & _
+    "EQ - 1|ACTIVE|0|ST:DL:1,ST:EHA2_L:1,ST:EHA2_R:1,ST:EQ_L:1,ST:ATA_L:1|1;" & _
+    "EQ - 2|ACTIVE|0|ST:DL:1,ST:EHA2_L:1,ST:EHA2_R:1,ST:EQ_R:1,ST:ATA_R:1|1;" & _
     "ENV_SER|ACTIVE|1|CB:SLS:1|2;" & _
     "ENV_STR|ACTIVE|1|CB:ULS:1|2;" & _
     "ENV_EQ|ACTIVE|1|CB:EQ - 1:1,CB:EQ - 2:1|2;" & _
@@ -731,13 +730,21 @@ Private Sub ResetProgress(ByVal total As Long)
     MAPI_KEY_CACHE = ""
     PROGRESS_TOTAL = IIf(total < 1, 1, total)
     ' Paired with ClearProgress, which already runs on every exit path.
-    ' ScreenUpdating only: EnableEvents and Calculation are deliberately NOT
-    ' touched here. This Sub has no error handler, and VBA restores
-    ' ScreenUpdating by itself when execution halts, whereas EnableEvents
-    ' stays off and would leave the workbook silently ignoring events. The
-    ' builders spend their time in MIDAS and HTTP, not repainting, so the
-    ' extra risk buys almost nothing.
+    ' EnableEvents is deliberately NOT touched: this Sub has no error
+    ' handler, and EnableEvents left off by a crash would leave the
+    ' workbook silently ignoring events. VBA restores ScreenUpdating by
+    ' itself when execution halts.
     Application.ScreenUpdating = False
+    ' Calculation: Manual for the run, so each cell the build writes (the
+    ' ordinate table, element lists, result tables) does not recalculate
+    ' the whole workbook. Automatic first, so a workbook left on Manual by
+    ' an earlier interrupted run is brought up to date before any input
+    ' is read. ClearProgress always ends on Automatic (owner, 2026-09-25:
+    ' never "the mode it had at the start").
+    On Error Resume Next
+    Application.Calculation = xlCalculationAutomatic
+    Application.Calculation = xlCalculationManual
+    On Error GoTo 0
 End Sub
 
 ' Hands the status bar back to Excel. Must run on EVERY exit path - a status
@@ -746,6 +753,7 @@ Private Sub ClearProgress()
     On Error Resume Next
     Application.StatusBar = False
     Application.ScreenUpdating = True
+    Application.Calculation = xlCalculationAutomatic
     ' Release the shared WinHTTP client at the end of a run (this Sub runs
     ' on every exit path); the next run builds a fresh one.
     Set HTTP_CLIENT = Nothing
@@ -2230,11 +2238,16 @@ End Function
 ' plate has its own NUM_X/NUM_Y pair - there is no single request that
 ' covers them all.
 '
-' Around each plate whose family feeds G10/G11, the whole model is
-' snapshotted before the divide and again after, so that plate's children
-' are exactly the difference. Nothing in the model can tell them apart
+' The children of the plates whose families feed G10/G11 are PREDICTED,
+' not read back (audit S4; measured live 2026-09-28 on a 3x3 plate grid
+' divided by this table with 8x8/8x8 and 5x3/4x6 counts, every plate
+' exact): a divided plate keeps its own number for one child, and the other
+' nx*ny - 1 take the next free numbers, max + 1 upwards, in the order the
+' plates are divided. That replaced two whole-model db/ELEM reads per
+' tracked plate. Nothing in the model can tell the families apart
 ' afterwards - a rigid sub-element carries the same thickness as its
-' non-rigid neighbours.
+' non-rigid neighbours - so PostElementLists checks the prediction against
+' its own db/ELEM read before it writes G10/G11.
 Private Function PostDivideElements() As String
 
     Dim rows() As String
@@ -2250,6 +2263,7 @@ Private Function PostDivideElements() As String
     NR_FOUND_COUNT = 0
     NR_WALL_COUNT = 0
     ELEM_SETS_READY = False
+    PREDICTED_ELEM_MAX = MaxBuiltElement()
 
     If MESH_X_WALL <= 1 And MESH_Y_WALL <= 1 And _
        MESH_X_FOUND <= 1 And MESH_Y_FOUND <= 1 Then
@@ -2270,9 +2284,8 @@ Private Function PostDivideElements() As String
         ny = MeshCount(f(2), elemNo)
         tracked = TrackedList(elemNo)
 
-        ' Snapshot the whole model BEFORE a tracked plate is split, so the
-        ' elements that appear are exactly its children.
-        If tracked <> 0 Then Call SnapshotElements
+        ' The plate keeps its own number whether divided or not.
+        If tracked <> 0 Then Call AddFamily(tracked, elemNo, elemNo)
 
         If nx > 1 Or ny > 1 Then
 
@@ -2294,9 +2307,13 @@ Private Function PostDivideElements() As String
 
             divided = divided + 1
 
-        End If
+            ' Its other children: the next nx*ny - 1 free numbers.
+            If tracked <> 0 Then
+                Call AddFamily(tracked, PREDICTED_ELEM_MAX + 1, PREDICTED_ELEM_MAX + nx * ny - 1)
+            End If
+            PREDICTED_ELEM_MAX = PREDICTED_ELEM_MAX + nx * ny - 1
 
-        If tracked <> 0 Then Call CaptureFamily(elemNo, tracked)
+        End If
 
     Next i
 
@@ -2397,57 +2414,72 @@ Private Sub SeedUndividedFamilies()
 
 End Sub
 
-' Every element in the model right now. A failed GET leaves the snapshot
-' empty, which CaptureFamily treats as "cannot tell" and falls back to the
-' plate's own number.
-Private Sub SnapshotElements()
+' Adds firstNo..lastNo to G10's set (whichList 1) or G11's (2).
+Private Sub AddFamily(ByVal whichList As Long, ByVal firstNo As Long, ByVal lastNo As Long)
 
-    Dim resp As String
-    Dim statusCode As Long
+    Dim n As Long
 
-    SNAP_COUNT = 0
-    Call SendApiRequest("GET", "db/ELEM", "", resp, statusCode)
-    If statusCode < 200 Or statusCode >= 300 Then Exit Sub
-
-    Call ParseElementsBySect(resp, SECT_ANY, SNAP_IDS, SNAP_COUNT)
+    For n = firstNo To lastNo
+        If whichList = 1 Then
+            Call AppendLong(NR_FOUND_IDS, NR_FOUND_COUNT, n)
+        Else
+            Call AppendLong(NR_WALL_IDS, NR_WALL_COUNT, n)
+        End If
+    Next n
 
 End Sub
 
-' Everything that was NOT in the snapshot, plus the plate's own number (a
-' divide reuses it for one of the children, so it never appears as new).
-' whichList picks the destination: 1 = G10's set, 2 = G11's.
-Private Sub CaptureFamily(ByVal elemNo As Long, ByVal whichList As Long)
+' The highest element number GenerateGeometry builds; the divide numbers
+' its new children on from here.
+Private Function MaxBuiltElement() As Long
 
-    Dim resp As String
-    Dim statusCode As Long
-    Dim nowIds() As Long
-    Dim nowCount As Long
+    Dim rows() As String
+    Dim i As Long
+    Dim n As Long
+
+    rows = Split(ELEMENT_LIST, ";")
+    For i = LBound(rows) To UBound(rows)
+        n = CLng(Split(rows(i), "|")(0))
+        If n > MaxBuiltElement Then MaxBuiltElement = n
+    Next i
+
+End Function
+
+' "" when the model holds exactly the elements the divide was predicted to
+' leave and every predicted family member sits in the right part (G10's in
+' the foundation, G11's in the walls); otherwise a WARN, and G10/G11 are not
+' written. Uses RefreshElementSets' read - no request of its own. A model
+' with elements beyond the built ones (CLEAN_BEFORE_BUILD off over an older
+' model) lands here, since the numbering then starts higher.
+Private Function FamilyCheck() As String
+
     Dim i As Long
 
-    If whichList = 1 Then
-        Call AppendLong(NR_FOUND_IDS, NR_FOUND_COUNT, elemNo)
-    Else
-        Call AppendLong(NR_WALL_IDS, NR_WALL_COUNT, elemNo)
+    If FOUND_COUNT + WALL_COUNT <> PREDICTED_ELEM_MAX Then
+        FamilyCheck = "WARN: the model holds " & (FOUND_COUNT + WALL_COUNT) & _
+            " plates but the divide should have left " & PREDICTED_ELEM_MAX & _
+            " - G10/G11 not written (elements left from an earlier model? " & _
+            "Build with CLEAN_BEFORE_BUILD on)."
+        Exit Function
     End If
 
-    If SNAP_COUNT = 0 Then Exit Sub
-
-    Call SendApiRequest("GET", "db/ELEM", "", resp, statusCode)
-    If statusCode < 200 Or statusCode >= 300 Then Exit Sub
-
-    Call ParseElementsBySect(resp, SECT_ANY, nowIds, nowCount)
-
-    For i = 1 To nowCount
-        If Not InLongArray(SNAP_IDS, SNAP_COUNT, nowIds(i)) Then
-            If whichList = 1 Then
-                Call AppendLong(NR_FOUND_IDS, NR_FOUND_COUNT, nowIds(i))
-            Else
-                Call AppendLong(NR_WALL_IDS, NR_WALL_COUNT, nowIds(i))
-            End If
+    For i = 1 To NR_FOUND_COUNT
+        If Not InLongArray(FOUND_IDS, FOUND_COUNT, NR_FOUND_IDS(i)) Then
+            FamilyCheck = "WARN: predicted foundation element " & NR_FOUND_IDS(i) & _
+                " is not a foundation plate in the model - G10/G11 not written."
+            Exit Function
         End If
     Next i
 
-End Sub
+    For i = 1 To NR_WALL_COUNT
+        If Not InLongArray(WALL_IDS, WALL_COUNT, NR_WALL_IDS(i)) Then
+            FamilyCheck = "WARN: predicted wall element " & NR_WALL_IDS(i) & _
+                " is not a wall plate in the model - G10/G11 not written."
+            Exit Function
+        End If
+    Next i
+
+End Function
 
 Private Sub AppendLong(ByRef ids() As Long, ByRef count As Long, ByVal v As Long)
 
@@ -2495,6 +2527,14 @@ Private Function PostElementLists() As String
 
     If FOUND_COUNT = 0 And WALL_COUNT = 0 Then
         PostElementLists = "WARN: db/ELEM returned no plates - element lists not written."
+        Exit Function
+    End If
+
+    ' The families were predicted, not read (see PostDivideElements) -
+    ' check them against the model before they go on the sheet.
+    res = FamilyCheck()
+    If Len(res) > 0 Then
+        PostElementLists = res
         Exit Function
     End If
 

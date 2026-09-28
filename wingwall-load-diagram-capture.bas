@@ -28,14 +28,14 @@ Option Explicit
 ' hand, so the file in the repo and the code actually running can silently
 ' diverge - check this stamp matches the constant here before concluding
 ' anything from a run. Bump it whenever this file changes.
-Private Const SCRIPT_VERSION As String = "2026-09-28a"
+Private Const SCRIPT_VERSION As String = "2026-09-28b"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Comments only: outdated TODO/placeholder notes brought up to date; no change in behaviour"
+Private Const SCRIPT_CHANGELOG As String = "Reads the load-case and combination tables once per run instead of once per picture (about 56 fewer requests on a full run)"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -61,6 +61,12 @@ Private MAPI_KEY_CACHE As String
 ' ALL module-level declarations precede the first procedure in VBA.
 ' Created on first use, released by EndFastMode.
 Private HTTP_CLIENT As Object
+
+' db/STLD and db/LCOM-GEN as read by CaseInModel - once per run, not once
+' per picture (every request goes through the cloud relay). "" = not read
+' yet; cleared at the entry point with MAPI_KEY_CACHE.
+Private CASE_TABLE_STLD As String
+Private CASE_TABLE_LCOM As String
 
 ' Images are saved in a subfolder next to this workbook, nested under a
 ' folder named after the workbook itself, i.e. for "mnf151.xlsm":
@@ -217,6 +223,9 @@ Sub CaptureWingwallLoadDiagrams()
     ' Re-read INPUT!J20 on every run, so a key rotated since the last run
     ' is actually used.
     MAPI_KEY_CACHE = ""
+    ' Same for the case/combination tables CaseInModel reads.
+    CASE_TABLE_STLD = ""
+    CASE_TABLE_LCOM = ""
 
     If Len(ThisWorkbook.Path) = 0 Then
         MsgBox "Save this workbook first - it has no folder to save captures into yet.", vbCritical
@@ -1191,26 +1200,39 @@ End Sub
 ' to capture.
 Private Function CaseInModel(ByVal caseType As String, ByVal caseName As String) As Boolean
 
-    Dim path As String
     Dim resp As String
-    Dim statusCode As Long
 
     CaseInModel = True
     If Len(caseName) = 0 Then Exit Function
 
     Select Case UCase$(caseType)
-        Case "ST": path = "db/STLD"
-        Case "CB": path = "db/LCOM-GEN"
+        Case "ST": resp = CachedCaseTable("db/STLD", CASE_TABLE_STLD)
+        Case "CB": resp = CachedCaseTable("db/LCOM-GEN", CASE_TABLE_LCOM)
         Case Else: Exit Function
     End Select
-
-    Call SendDbRequest("GET", path, "", resp, statusCode)
-    If Not IsApiSuccess(statusCode, resp) Then Exit Function
+    If Len(resp) = 0 Then Exit Function
 
     If InStr(1, resp, """NAME"":""" & caseName & """", vbTextCompare) = 0 And _
        InStr(1, resp, """NAME"": """ & caseName & """", vbTextCompare) = 0 Then
         CaseInModel = False
     End If
+
+End Function
+
+
+' The GET body of "path", read once per run into "cache" (one of the
+' CASE_TABLE_* variables). A failed read returns "" and is not cached, so the
+' next job tries again - exactly what it did when every job read it.
+Private Function CachedCaseTable(ByVal path As String, ByRef cache As String) As String
+
+    Dim resp As String
+    Dim statusCode As Long
+
+    If Len(cache) = 0 Then
+        Call SendDbRequest("GET", path, "", resp, statusCode)
+        If IsApiSuccess(statusCode, resp) Then cache = resp
+    End If
+    CachedCaseTable = cache
 
 End Function
 

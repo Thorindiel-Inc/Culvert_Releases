@@ -28,14 +28,14 @@ Option Explicit
 ' so a screenshot of a run does not otherwise say which build produced it -
 ' bump this whenever the file changes and check it matches before
 ' diagnosing anything from a report.
-Private Const SCRIPT_VERSION As String = "2026-09-24c"
+Private Const SCRIPT_VERSION As String = "2026-09-28a"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "INPUT!B26 = YOK builds without live load: no LL, LLin, LLacc, LSS2_L, LSA2_L cases or loads, their terms left out of the combinations, no ACC-1 (LL1 and LSS1_L stay)."
+Private Const SCRIPT_CHANGELOG As String = "Excel calculation is Manual while the build writes cells and always Automatic at the end; Ec fallback (blank MIDAS_INPUT!B43) is now 33 GPa, as the SAP2000 culvert."
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -100,7 +100,7 @@ Private Const MATERIAL_DAMP_RATIO As Double = 0.05
 Private Const MATERIAL_POISN As Double = 0.2
 Private Const MATERIAL_THERMAL As Double = 0.00001
 Private Const MATERIAL_MASS As Double = 0
-Private Const MATERIAL_ELAST_DEFAULT As Double = 26291000#  ' fallback if B43 is blank/invalid
+Private Const MATERIAL_ELAST_DEFAULT As Double = 33000000#  ' fallback if B43 is blank/invalid (33 GPa, as the SAP2000 culvert)
 Private Const MATERIAL_DEN_DEFAULT As Double = 25           ' fallback if INPUT!B5 is blank/invalid
 
 ' Every *SECTION row is "DBUSER ... SB, 2, <depth>, 1, 0 x8" - a solid
@@ -724,13 +724,21 @@ Private Sub ResetProgress(ByVal total As Long)
     MAPI_KEY_CACHE = ""
     PROGRESS_TOTAL = IIf(total < 1, 1, total)
     ' Paired with ClearProgress, which already runs on every exit path.
-    ' ScreenUpdating only: EnableEvents and Calculation are deliberately NOT
-    ' touched here. This Sub has no error handler, and VBA restores
-    ' ScreenUpdating by itself when execution halts, whereas EnableEvents
-    ' stays off and would leave the workbook silently ignoring events. The
-    ' builders spend their time in MIDAS and HTTP, not repainting, so the
-    ' extra risk buys almost nothing.
+    ' EnableEvents is deliberately NOT touched: this Sub has no error
+    ' handler, and EnableEvents left off by a crash would leave the
+    ' workbook silently ignoring events. VBA restores ScreenUpdating by
+    ' itself when execution halts.
     Application.ScreenUpdating = False
+    ' Calculation: Manual for the run, so each cell the build writes (the
+    ' ordinate table, element lists, result tables) does not recalculate
+    ' the whole workbook. Automatic first, so a workbook left on Manual by
+    ' an earlier interrupted run is brought up to date before any input
+    ' is read. ClearProgress always ends on Automatic (owner, 2026-09-25:
+    ' never "the mode it had at the start").
+    On Error Resume Next
+    Application.Calculation = xlCalculationAutomatic
+    Application.Calculation = xlCalculationManual
+    On Error GoTo 0
 End Sub
 
 ' Hands the status bar back to Excel. Must run on EVERY exit path - a
@@ -739,6 +747,7 @@ Private Sub ClearProgress()
     On Error Resume Next
     Application.StatusBar = False
     Application.ScreenUpdating = True
+    Application.Calculation = xlCalculationAutomatic
     ' Release the shared WinHTTP client at the end of a run (this Sub runs
     ' on every exit path); the next run builds a fresh one.
     Set HTTP_CLIENT = Nothing
