@@ -27,14 +27,14 @@ Option Explicit
 ' hand, so the file in the repo and the code actually running can silently
 ' diverge - check this stamp matches the constant here before concluding
 ' anything from a run. Bump it whenever this file changes.
-Private Const SCRIPT_VERSION As String = "2026-09-25a"
+Private Const SCRIPT_VERSION As String = "2026-09-28a"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Calculation always goes back to Automatic at the end (it used to restore the starting mode, so one interrupted run left Excel on Manual for good)"
+Private Const SCRIPT_CHANGELOG As String = "Comments only: outdated TODO/placeholder notes brought up to date; no change in behaviour"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -70,25 +70,21 @@ Private HTTP_CLIENT As Object
 ' not land in the same folder.
 Private Const CAPTURE_SUBFOLDER As String = "WINGWALL_DISPLACEMENTS"
 
-' Sheet that holds the figures to replace. TODO: set this once you know
-' which sheet holds the wingwall figures - left empty for now, which uses
-' whichever sheet is active when the macro runs.
+' Sheet that holds the figures to replace. Leave empty to use whichever
+' sheet is active when the macro runs.
 Private Const TARGET_SHEET_NAME As String = "6_ZG"
 
 ' One capture per row: CombName|CombType|MinMax|Component|ShapeName
-'   CombType  : "ST" "CS" "RS" "TH" "MV" "SM" "CB" - these 11 rows are all
-'               plain static load cases ("ST"), not envelope combinations,
-'               so MinMax below is a required-but-unused placeholder value.
+'   CombType  : "ST" "CS" "RS" "TH" "MV" "SM" "CB" - every row here is an
+'               envelope combination ("CB"), so MinMax picks its side.
 '   MinMax    : "Max" "Min" "All" (All = envelope abs max, per the doc).
 '   Component : "DX" "DY" "DZ" "RX" "RY" "RZ" "RW" "DXY" "DYZ" "DXZ" "DXYZ"
 '   ShapeName : name of the existing Picture/Shape on TARGET_SHEET_NAME to
 '               replace (Name Box, top-left, when the picture is selected -
 '               or Home > Find & Select > Selection Pane).
-' Rows separated by ";". TODO: Component is a placeholder ("DZ", vertical
-' displacement) - duplicate a row with a different Component ("DX", "DY",
-' ...) for any other direction you need per case. ShapeName below is a
-' placeholder guess ('dl, 'ehs2_l, ...) - rename to match the actual
-' Picture/Shape names once they exist on TARGET_SHEET_NAME.
+' Rows separated by ";". Every row captures DZ (vertical displacement) -
+' duplicate a row with a different Component ("DX", "DY", ...) for any
+' other direction.
 Private Const JOB_LIST As String = _
     "ENV_SER|CB|Min|DZ|env_ser;" & _
     "ENV_STR|CB|Min|DZ|env_str;" & _
@@ -460,13 +456,9 @@ Private Function BuildCaptureBody(ByVal exportPath As String, _
     b = b & """GRADIENT_FILL"": false"
     b = b & "}"
     b = b & "},"
-    ' DEFORM.OPT_CHECK true, matching midas-displacement-contour-capture.bas
-    ' (the working non-wingwall counterpart). The previous "false, confirmed
-    ' live" comment here had no actual test run backing it in this file's
-    ' history - likely an unverified claim copied in alongside the other
-    ' still-placeholder values in this script (combo names, ShapeNames).
-    ' If captures fail with contour fill not rendering, re-test false vs
-    ' true directly rather than trusting either comment blindly.
+    ' DEFORM.OPT_CHECK false - what runs correctly on the real wingwall
+    ' (confirmed by the owner). If contour fill ever stops rendering,
+    ' re-test false vs true live rather than copying another script's form.
     b = b & """DEFORM"": {"
     b = b & """OPT_CHECK"": false,"
     b = b & """SCALE_FACTOR"": " & JsonNum(DEFORM_SCALE_FACTOR) & ","

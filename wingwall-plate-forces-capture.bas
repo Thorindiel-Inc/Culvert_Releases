@@ -28,14 +28,14 @@ Option Explicit
 ' hand, so the file in the repo and the code actually running can silently
 ' diverge - check this stamp matches the constant here before concluding
 ' anything from a run. Bump it whenever this file changes.
-Private Const SCRIPT_VERSION As String = "2026-09-25b"
+Private Const SCRIPT_VERSION As String = "2026-09-28a"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Six more captures (STR TML Fx, STR TML Mx, EQ TML Fx, EQ TML Mx Mak, SER TML Fx, SER TML Mx); shear (V) pictures of the foundation now in local axes instead of the FOUND UCS."
+Private Const SCRIPT_CHANGELOG As String = "Comments only: outdated TODO/placeholder notes brought up to date; no change in behaviour"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -79,10 +79,9 @@ Private Const TARGET_SHEET_NAME As String = "4_SONUC"
 '                "ENV_EQ") - sent as LOAD_CASE_COMB.NAME, not a per-row label.
 '   CombType   : "CB" (Load Combination) for every row here - ULS/SLS/ENV_EQ
 '                are all named combinations, not raw load cases.
-'   MinMax     : "Min" "Max" "All" - only ENV_EQ is a true envelope, so
-'                MinMax is a required-but-mostly-unused placeholder ("Max")
-'                on the ULS/SLS rows; the two "My Min"/"My Mak" rows are the
-'                only ones where it's meaningful.
+'   MinMax     : "Min" "Max" "All" - "All" on most rows; the ENV_EQ rows
+'                eq_dvr_mx (Min), eq_tml_my_min (Min), eq_tml_my_mak and
+'                eq_tml_mx_mak (Max) pick one side of the envelope.
 '   Component  : per the Plate Forces/Moments doc's COMP enum -
 '                "Fxx" "Fyy" "Fxy" "Fmax" "Fmin" "FMax"
 '                "Mxx" "Myy" "Mxy" "Mmax" "Mmin" "MMax"
@@ -94,9 +93,7 @@ Private Const TARGET_SHEET_NAME As String = "4_SONUC"
 '   ShapeName  : encodes both the Picture/Shape name AND which element list
 '                to activate - "dvr" (Duvar/wall) rows use ELEMENT_LIST_WALL,
 '                "tml" (Temel/foundation) rows use ELEMENT_LIST_FOUND, per
-'                ElementListForShape(). TODO: these are placeholder guesses
-'                ('str_dvr_fx, ...) - rename to match the actual Picture/
-'                Shape names once they exist on TARGET_SHEET_NAME.
+'                ElementListForShape().
 ' Rows separated by ";". Combinations below per the owner-supplied table
 ' (STR/EQ/SER checks at DVR/TML locations, ULS/ENV_EQ/SLS combinations).
 Private Const JOB_LIST As String = _

@@ -25,14 +25,14 @@ Option Explicit
 ' hand, so the file in the repo and the code actually running can silently
 ' diverge - check this stamp matches the constant here before concluding
 ' anything from a run. Bump it whenever this file changes.
-Private Const SCRIPT_VERSION As String = "2026-09-25a"
+Private Const SCRIPT_VERSION As String = "2026-09-28a"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Calculation always goes back to Automatic at the end (it used to restore the starting mode, so one interrupted run left Excel on Manual for good)"
+Private Const SCRIPT_CHANGELOG As String = "Comments only: outdated TODO/placeholder notes brought up to date; no change in behaviour"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -979,15 +979,9 @@ End Sub
 
 ' Explicitly sets Civil NX model view to Active All via view/ACTIVE.
 '
-' UNCONFIRMED FIELD: "ACTIVE_MODE": "All" is a guess by analogy, not a
-' documented value - the Capture doc's own ACTIVE field just says "refer
-' to the view/ACTIVE manual" for its schema, and that manual page was
-' never fetched (same gap noted in CLAUDE.md). "Active" + N_LIST/E_LIST
-' is the only value confirmed from a worked example. If this silently
-' does nothing, captures still proceed using whatever was already active
-' in Civil NX - which is exactly the state this call exists to avoid, so
-' the caller surfaces a WARN rather than treating a bad response here as
-' fatal to the whole run.
+' "ACTIVE_MODE": "All" is confirmed live (Civil NX answers "command
+' complete"). A failure here is still only a WARN: captures proceed with
+' whatever was already active in Civil NX.
 '
 ' Returns "" on success (2xx, no "error" key), else a short failure
 ' message - same convention as SendCaptureRequest/ShortApiError.

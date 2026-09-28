@@ -28,14 +28,14 @@ Option Explicit
 ' hand, so the file in the repo and the code actually running can silently
 ' diverge - check this stamp matches the constant here before concluding
 ' anything from a run. Bump it whenever this file changes.
-Private Const SCRIPT_VERSION As String = "2026-09-25a"
+Private Const SCRIPT_VERSION As String = "2026-09-28a"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Calculation always goes back to Automatic at the end (it used to restore the starting mode, so one interrupted run left Excel on Manual for good)"
+Private Const SCRIPT_CHANGELOG As String = "Comments only: outdated TODO/placeholder notes brought up to date; no change in behaviour"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -87,10 +87,8 @@ Private Const TARGET_SHEET_NAME As String = "3_MODEL"
 '   Springs  : "1" shows the foundation springs/supports (per
 '              SHOW_POINT_SPRING_SUPPORT/SHOW_SUPPORT), "0" hides them.
 '              Only the "2D" row shows them; "3D" and every load case hide.
-' Rows separated by ";". TODO: ShapeName below is a placeholder guess
-' ('dl, 'ehs2_l, ...) following the naming convention already used in
-' midas-load-diagram-capture.bas's LOAD_JOB_LIST - rename to match the
-' actual Picture/Shape names once they exist on TARGET_SHEET_NAME.
+' Rows separated by ";". ShapeNames follow the culvert load diagram's
+' convention (leading apostrophe, lowercase case name).
 Private Const LOAD_JOB_LIST As String = _
     "ST|EHS2_L|EHS2_L|'ehs2_l|0|0;" & _
     "ST|EHA2_L|EHA2_L|'eha2_l|0|0;" & _
@@ -119,8 +117,8 @@ Private Const ZOOM_LEVEL As Long = 98
 
 ' Elements to activate before capture (only these are shown/plotted).
 ' Space- or comma-separated; supports MIDAS "AtoB" range shorthand.
-' TODO: set this to the wingwall's element numbers once known - left empty
-' for now, which shows the whole model (skips sending ACTIVE at all).
+' Empty shows the whole model (ACTIVE is not sent at all) - the owner's
+' working setting.
 Private Const ELEMENT_LIST As String = ""
 
 ' Which load types to draw. Booleans per the Display doc's LOAD schema.
@@ -158,8 +156,8 @@ Private Const LABEL_ORIENTATION As Long = 15
 ' Whether to send LOAD_VALUE (i.e. print a numeric label at every loaded
 ' node/element). Owner's call: kept True despite the wingwall's dense
 ' shell mesh piling per-node labels into overlapping text (a capture with
-' no numbers isn't useful) - ELEMENT_LIST scoping to one wingwall's
-' elements at a time is the real fix for legibility, once known.
+' no numbers isn't useful). If legibility ever needs fixing, scope
+' ELEMENT_LIST to one wall's elements at a time.
 Private Const SHOW_LOAD_VALUE_LABELS As Boolean = True
 
 ' Force/length units to switch to for these captures (db/UNIT, "Unit System"
