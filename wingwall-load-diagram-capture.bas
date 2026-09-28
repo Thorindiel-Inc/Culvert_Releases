@@ -28,14 +28,14 @@ Option Explicit
 ' hand, so the file in the repo and the code actually running can silently
 ' diverge - check this stamp matches the constant here before concluding
 ' anything from a run. Bump it whenever this file changes.
-Private Const SCRIPT_VERSION As String = "2026-09-28b"
+Private Const SCRIPT_VERSION As String = "2026-09-28c"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Reads the load-case and combination tables once per run instead of once per picture (about 56 fewer requests on a full run)"
+Private Const SCRIPT_CHANGELOG As String = "The RIGHT wall pictures turn with the wall: view = 325 - (INPUT!C22 + C23), 280 on the 15/30 layout; blank or non-number angles fall back to 280 with a warning"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -179,10 +179,28 @@ Private Const CAPTURE_DIST_UNIT As String = "M"
 ' viewing from opposite sides for their loads to render correctly. Any
 ' other case (no "_L"/"_R" suffix) sends no ANGLE block at all, keeping
 ' whatever view is currently active in Civil NX.
+'
+' Measured 2026-09-28: HORIZONTAL = h puts the camera at plan bearing
+' 270 - h (degrees from global +X), looking back at the model. The wingwall
+' builder lays the LEFT wall on global +X whatever its angle, so the LEFT
+' view is fixed. The RIGHT wall runs at C22 + C23 (INPUT: LEFT angle + RIGHT
+' angle) from +X, so its view turns with it:
+'     HORIZONTAL = VIEW_ANGLE_HORIZONTAL_R_BASE - (C22 + C23)
+' which gives the hand-tuned 280 on the 15/30 layout it was chosen on and
+' keeps the wall readable on others (a fixed 280 saw parallel walls almost
+' edge-on). VIEW_ANGLE_HORIZONTAL_FOR_R_SIDE is the fallback when the two
+' cells cannot be read.
 Private Const VIEW_ANGLE_HORIZONTAL_FOR_L_SIDE As Long = 240
 Private Const VIEW_ANGLE_VERTICAL_FOR_L_SIDE As Long = 10
+Private Const VIEW_ANGLE_HORIZONTAL_R_BASE As Long = 325
 Private Const VIEW_ANGLE_HORIZONTAL_FOR_R_SIDE As Long = 280
 Private Const VIEW_ANGLE_VERTICAL_FOR_R_SIDE As Long = 10
+Private Const WALL_ANGLE_SHEET As String = "INPUT"
+Private Const CELL_LEFT_WALL_ANGLE As String = "C22"
+Private Const CELL_RIGHT_WALL_ANGLE As String = "C23"
+
+' The RIGHT view actually used this run - set by SetRightViewAngle.
+Private RIGHT_VIEW_HORIZONTAL As Long
 
 
 ' ---------------------------------------------------------------------------
@@ -215,6 +233,7 @@ Sub CaptureWingwallLoadDiagrams()
     Dim fastMode As Boolean
     Dim report As String
     Dim dispResult As String
+    Dim viewNote As String
 
     Dim label As String
     Dim okLog As String, warnLog As String, skipLog As String, failLog As String
@@ -250,6 +269,10 @@ Sub CaptureWingwallLoadDiagrams()
     Else
         Set ws = ActiveSheet
     End If
+
+    ' The RIGHT wall's view follows its angle - read before anything is
+    ' changed in the model; a fallback is only a warning.
+    viewNote = SetRightViewAngle()
 
     ' Read the model's current Unit System so it can be restored afterwards,
     ' then switch to CAPTURE_FORCE_UNIT/CAPTURE_DIST_UNIT for these captures.
@@ -321,6 +344,7 @@ Sub CaptureWingwallLoadDiagrams()
     report = "Wingwall load diagram capture  [" & SCRIPT_VERSION & "]" & vbCrLf & _
              RestoreUnitsAndReport(origForce, origDist, origHeat, origTemper) & vbCrLf
     If Len(unitWarn) > 0 Then report = report & unitWarn & vbCrLf
+    report = report & viewNote & vbCrLf
     report = report & vbCrLf & BuildSummaryReport(okCount, warnCount, skipCount, failCount, _
                                                   okLog, warnLog, skipLog, failLog)
 
@@ -676,7 +700,7 @@ Private Function BuildLoadCaptureBody(ByVal exportPath As String, _
     ' captures from the wrong side. Any other case sends no ANGLE block,
     ' keeping whatever view is currently active in Civil NX.
     If IsRightSideCase(job.CaseName) Then
-        b = b & """ANGLE"": {""HORIZONTAL"": " & VIEW_ANGLE_HORIZONTAL_FOR_R_SIDE & _
+        b = b & """ANGLE"": {""HORIZONTAL"": " & RIGHT_VIEW_HORIZONTAL & _
                  ", ""VERTICAL"": " & VIEW_ANGLE_VERTICAL_FOR_R_SIDE & "},"
     ElseIf IsLeftSideCase(job.CaseName) Then
         b = b & """ANGLE"": {""HORIZONTAL"": " & VIEW_ANGLE_HORIZONTAL_FOR_L_SIDE & _
@@ -866,6 +890,55 @@ End Function
 ' ===========================================================================
 '  HELPERS
 ' ===========================================================================
+
+' Sets RIGHT_VIEW_HORIZONTAL from the wall angles (see the constants) and
+' returns the report line saying which view the RIGHT pictures use. Blank,
+' text or an error in either cell falls back to the fixed
+' VIEW_ANGLE_HORIZONTAL_FOR_R_SIDE with a WARNING - the pictures still run.
+Private Function SetRightViewAngle() As String
+
+    Dim ws As Worksheet
+    Dim vL As Variant, vR As Variant
+    Dim h As Long
+
+    RIGHT_VIEW_HORIZONTAL = VIEW_ANGLE_HORIZONTAL_FOR_R_SIDE
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(WALL_ANGLE_SHEET)
+    If Not ws Is Nothing Then
+        vL = ws.Range(CELL_LEFT_WALL_ANGLE).Value
+        vR = ws.Range(CELL_RIGHT_WALL_ANGLE).Value
+    End If
+    On Error GoTo 0
+
+    If ws Is Nothing Then
+        SetRightViewAngle = "WARNING: sheet " & WALL_ANGLE_SHEET & " not found - the RIGHT " & _
+            "pictures use the fixed view " & VIEW_ANGLE_HORIZONTAL_FOR_R_SIDE & "."
+        Exit Function
+    End If
+
+    If IsError(vL) Or IsError(vR) Or IsEmpty(vL) Or IsEmpty(vR) Then
+        SetRightViewAngle = "WARNING: " & WALL_ANGLE_SHEET & "!" & CELL_LEFT_WALL_ANGLE & "/" & _
+            CELL_RIGHT_WALL_ANGLE & " (wall angles) blank or an error - the RIGHT pictures " & _
+            "use the fixed view " & VIEW_ANGLE_HORIZONTAL_FOR_R_SIDE & "."
+        Exit Function
+    End If
+    If Not IsNumeric(vL) Or Not IsNumeric(vR) Then
+        SetRightViewAngle = "WARNING: " & WALL_ANGLE_SHEET & "!" & CELL_LEFT_WALL_ANGLE & "/" & _
+            CELL_RIGHT_WALL_ANGLE & " (wall angles) not numbers - the RIGHT pictures " & _
+            "use the fixed view " & VIEW_ANGLE_HORIZONTAL_FOR_R_SIDE & "."
+        Exit Function
+    End If
+
+    h = VIEW_ANGLE_HORIZONTAL_R_BASE - CLng(CDbl(vL) + CDbl(vR))
+    h = ((h Mod 360) + 360) Mod 360
+    RIGHT_VIEW_HORIZONTAL = h
+
+    SetRightViewAngle = "RIGHT wall view: " & h & " = " & VIEW_ANGLE_HORIZONTAL_R_BASE & _
+        " - (" & CELL_LEFT_WALL_ANGLE & " " & CDbl(vL) & " + " & CELL_RIGHT_WALL_ANGLE & _
+        " " & CDbl(vR) & "); LEFT wall view: " & VIEW_ANGLE_HORIZONTAL_FOR_L_SIDE & "."
+
+End Function
 
 ' True if caseName ends with "_R" (case-insensitive), e.g. "EHS2_R".
 Private Function IsRightSideCase(ByVal caseName As String) As Boolean
