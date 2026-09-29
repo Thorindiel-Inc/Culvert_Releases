@@ -28,14 +28,14 @@ Option Explicit
 ' so a screenshot of a run does not otherwise say which build produced it -
 ' bump this whenever the file changes and check it matches before
 ' diagnosing anything from a report.
-Private Const SCRIPT_VERSION As String = "2026-09-28a"
+Private Const SCRIPT_VERSION As String = "2026-09-29a"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Excel calculation is Manual while the build writes cells and always Automatic at the end; Ec fallback (blank MIDAS_INPUT!B43) is now 33 GPa, as the SAP2000 culvert."
+Private Const SCRIPT_CHANGELOG As String = "INPUT!K17 = 1 adds six minimum-vertical ultimate combinations ULS-15..20 (DL/EV x0.90, no vertical live load) to ENV_STR (0 or blank builds as before); the build report is shown whole instead of cut at ~1000 characters"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -312,6 +312,22 @@ Private LIVE_LOAD_ACTIVE As Boolean
 Private LIVE_LOAD_GATE_SOURCE As String
 
 ' ---------------------------------------------------------------------------
+'  MIN-VERTICAL GATE - INPUT!K17 = 1 adds six minimum-vertical / maximum-
+'  horizontal ultimate combinations, ULS-15..20: DL and EV at the AASHTO
+'  minimum 0.90, no vertical live load, the horizontal factors of
+'  ULS-1/2/5/6/9/10 (owner's request, 2026-09-29 - for the situations where
+'  a light roof and full earth pressure govern). They join ENV_STR, so
+'  ENV_ALL and MIDAS_RESULTS pick them up with no other change.
+'
+'  0 or blank -> OFF: the model is exactly as without this gate, keys
+'  included. Anything else (text, another number, an error value) stops the
+'  build - a typo must not silently pick either set.
+' ---------------------------------------------------------------------------
+Private Const MIN_VERTICAL_GATE_CELL As String = "K17"
+Private MIN_VERTICAL_ACTIVE As Boolean
+Private MIN_VERTICAL_GATE_SOURCE As String
+
+' ---------------------------------------------------------------------------
 '  PROGRESS BAR
 '
 '  Drawn in Excel's status bar rather than a UserForm, so this module stays
@@ -550,6 +566,54 @@ Private Function IsLiveLoadCase(ByVal nm As String) As Boolean
                       nm = "LSS2_L" Or nm = "LSA2_L")
 End Function
 
+' Reads INPUT!K17 and sets MIN_VERTICAL_ACTIVE/MIN_VERTICAL_GATE_SOURCE.
+' Returns "" when the cell holds 1, 0 or nothing, otherwise a message
+' naming it - the build stops on it, same pattern as InitLiveLoadGate.
+Private Function InitMinVerticalGate() As String
+
+    Dim ws As Worksheet
+    Dim v As Variant
+    Dim s As String
+
+    InitMinVerticalGate = ""
+    ' Reset every run - module-level values survive between runs.
+    MIN_VERTICAL_ACTIVE = False
+    MIN_VERTICAL_GATE_SOURCE = ""
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(PROJECT_SHEET_NAME)
+    On Error GoTo 0
+
+    If ws Is Nothing Then
+        MIN_VERTICAL_GATE_SOURCE = "sheet """ & PROJECT_SHEET_NAME & """ not found, defaulted to OFF"
+        Exit Function
+    End If
+
+    v = ws.Range(MIN_VERTICAL_GATE_CELL).Value
+
+    If IsError(v) Then
+        InitMinVerticalGate = PROJECT_SHEET_NAME & "!" & MIN_VERTICAL_GATE_CELL & _
+                              " (min-vertical combinations) is an error value. Set it to 1, 0 or blank."
+        Exit Function
+    End If
+
+    ' CStr of a whole number has no decimal separator, so "1"/"0" are
+    ' locale-safe; a typed text "1" counts the same as the number.
+    s = Trim$(CStr(v))
+
+    If s = "1" Then
+        MIN_VERTICAL_ACTIVE = True
+        MIN_VERTICAL_GATE_SOURCE = PROJECT_SHEET_NAME & "!" & MIN_VERTICAL_GATE_CELL & " = 1"
+    ElseIf s = "0" Or Len(s) = 0 Then
+        MIN_VERTICAL_GATE_SOURCE = PROJECT_SHEET_NAME & "!" & MIN_VERTICAL_GATE_CELL & " = " & _
+                                   IIf(Len(s) = 0, "(blank)", "0")
+    Else
+        InitMinVerticalGate = PROJECT_SHEET_NAME & "!" & MIN_VERTICAL_GATE_CELL & _
+                              " (min-vertical combinations) is """ & s & """. Set it to 1, 0 or blank."
+    End If
+
+End Function
+
 
 ' ===========================================================================
 '  ENTRY POINTS
@@ -562,6 +626,9 @@ Sub BuildCulvertModel()
     Dim ok As Boolean
     Dim vLcom As String, vStld As String
     Dim liveLoadErr As String
+    Dim minVertErr As String
+    Dim steps As String
+    Dim khNote As Boolean
 
     Call InitSeismicGate
 
@@ -579,11 +646,9 @@ Sub BuildCulvertModel()
     End If
 
     If SEISMIC_ACTIVE Then
-        report = report & "NOTE - seismic gate is ON (" & SEISMIC_GATE_SOURCE & "): EQ/ATA " & _
-                 "cases and loads, EQ-1 and ENV_EQ active." & vbCrLf & String(40, "-") & vbCrLf
+        report = report & "Seismic ON (" & SEISMIC_GATE_SOURCE & "): EQ/ATA, EQ-1, ENV_EQ." & vbCrLf
     Else
-        report = report & "NOTE - seismic gate is OFF (" & SEISMIC_GATE_SOURCE & "): no EQ/ATA " & _
-                 "cases or loads." & vbCrLf & String(40, "-") & vbCrLf
+        report = report & "Seismic OFF (" & SEISMIC_GATE_SOURCE & "): no EQ/ATA." & vbCrLf
     End If
 
     liveLoadErr = InitLiveLoadGate()
@@ -597,12 +662,27 @@ Sub BuildCulvertModel()
     End If
 
     If LIVE_LOAD_ACTIVE Then
-        report = report & "NOTE - live load is ON (" & LIVE_LOAD_GATE_SOURCE & ")." & _
-                 vbCrLf & String(40, "-") & vbCrLf
+        report = report & "Live load ON (" & LIVE_LOAD_GATE_SOURCE & ")." & vbCrLf
     Else
-        report = report & "NOTE - live load is OFF (" & LIVE_LOAD_GATE_SOURCE & "): no LL/LLin/" & _
-                 "LLacc/LSS2_L/LSA2_L cases or loads, no ACC-1." & vbCrLf & String(40, "-") & vbCrLf
+        report = report & "Live load OFF (" & LIVE_LOAD_GATE_SOURCE & "): no LL/LLin/LLacc/" & _
+                 "LSS2_L/LSA2_L, no ACC-1." & vbCrLf
     End If
+
+    minVertErr = InitMinVerticalGate()
+
+    If Len(minVertErr) > 0 Then
+        MsgBox report & "STOPPED - nothing was changed in the model." & vbCrLf & vbCrLf & _
+               minVertErr, vbExclamation
+        Exit Sub
+    End If
+
+    If MIN_VERTICAL_ACTIVE Then
+        report = report & "Min-vertical ON (" & MIN_VERTICAL_GATE_SOURCE & "): ULS-15..20, " & _
+                 "DL/EV x0.90, in ENV_STR." & vbCrLf
+    Else
+        report = report & "Min-vertical OFF (" & MIN_VERTICAL_GATE_SOURCE & ")." & vbCrLf
+    End If
+    report = report & String(40, "-") & vbCrLf
 
     ' Wipe first, so every PUT below lands in an empty endpoint and the
     ' key/name numbering cannot disagree with whatever was there before.
@@ -629,35 +709,72 @@ Sub BuildCulvertModel()
     End If
 
 
-    ok = StepResult(report, Progress("Unit System"), PostUnitSystem())
-    If ok Then ok = StepResult(report, Progress("Structure Type"), PostStructureType())
-    If ok Then ok = StepResult(report, Progress("Read inputs + generate geometry"), GeometrySetup())
+    ok = StepResult(steps, Progress("Unit System"), PostUnitSystem())
+    If ok Then ok = StepResult(steps, Progress("Structure Type"), PostStructureType())
+    If ok Then ok = StepResult(steps, Progress("Read inputs + generate geometry"), GeometrySetup())
     ' After GeometrySetup - that is where the project name is read.
-    If ok Then ok = StepResult(report, Progress("Project Information"), PostProjectInfo())
-    If ok Then ok = StepResult(report, Progress("Main Control Data"), PostMainControlData())
-    If ok Then ok = StepResult(report, Progress("Material"), PostMaterial())
-    If ok Then ok = StepResult(report, Progress("Sections"), PostSections())
-    If ok Then ok = StepResult(report, Progress("Section Colours"), PostSectionColors())
-    If ok Then ok = StepResult(report, Progress("Nodes"), PostNodes())
-    If ok Then ok = StepResult(report, Progress("Elements"), PostElements())
-    If ok Then ok = StepResult(report, Progress("Static Load Cases"), PostStaticLoadCases())
-    If ok Then ok = StepResult(report, Progress("Self-Weight"), PostSelfWeight())
-    If ok And SEISMIC_ACTIVE And DIM_ATA_FACTOR = 0 Then
+    If ok Then ok = StepResult(steps, Progress("Project Information"), PostProjectInfo())
+    If ok Then ok = StepResult(steps, Progress("Main Control Data"), PostMainControlData())
+    If ok Then ok = StepResult(steps, Progress("Material"), PostMaterial())
+    If ok Then ok = StepResult(steps, Progress("Sections"), PostSections())
+    If ok Then ok = StepResult(steps, Progress("Section Colours"), PostSectionColors())
+    If ok Then ok = StepResult(steps, Progress("Nodes"), PostNodes())
+    If ok Then ok = StepResult(steps, Progress("Elements"), PostElements())
+    If ok Then ok = StepResult(steps, Progress("Static Load Cases"), PostStaticLoadCases())
+    If ok Then ok = StepResult(steps, Progress("Self-Weight"), PostSelfWeight())
+    khNote = (ok And SEISMIC_ACTIVE And DIM_ATA_FACTOR = 0)
+    If ok Then ok = StepResult(steps, Progress("Beam Loads"), PostBeamLoads())
+    If ok Then ok = StepResult(steps, Progress("Load Combinations"), PostLoadCombinations())
+    If ok Then ok = StepResult(steps, Progress("Divide Elements"), PostDivideElements())
+    If ok Then ok = StepResult(steps, Progress("Foundation Springs"), PostFoundationSprings())
+    If ok Then ok = StepResult(steps, Progress("Element List"), PostNonRigidElementList())
+    If ok Then ok = StepResult(steps, Progress("Perform Analysis"), PostPerformAnalysis())
+    If ok Then ok = StepResult(steps, Progress("Beam Force Results"), PostBeamForceResults())
+
+    ' Every step clean: one line instead of 19, so the report stays a
+    ' readable size (owner, 2026-09-29). A WARN or FAIL lists every step -
+    ' VerdictFirst finds the failing one there.
+    If ok And InStr(1, steps, "WARN - ", vbBinaryCompare) = 0 Then
+        report = report & "OK   - all " & (Len(steps) - Len(Replace(steps, vbCrLf, ""))) \ 2 & _
+                 " build steps" & vbCrLf
+    Else
+        report = report & steps
+    End If
+    If khNote Then
         report = report & "NOTE - kh (" & INPUT_SHEET_NAME & "!B15) is 0: ATA load case kept, " & _
                  "no ATA self-weight." & vbCrLf
     End If
-    If ok Then ok = StepResult(report, Progress("Beam Loads"), PostBeamLoads())
-    If ok Then ok = StepResult(report, Progress("Load Combinations"), PostLoadCombinations())
-    If ok Then ok = StepResult(report, Progress("Divide Elements"), PostDivideElements())
-    If ok Then ok = StepResult(report, Progress("Foundation Springs"), PostFoundationSprings())
-    If ok Then ok = StepResult(report, Progress("Element List"), PostNonRigidElementList())
-    If ok Then ok = StepResult(report, Progress("Perform Analysis"), PostPerformAnalysis())
-    If ok Then ok = StepResult(report, Progress("Beam Force Results"), PostBeamForceResults())
 
     report = VerdictFirst(report, ok)
 
     ' Before the MsgBox, and on the failure path too - see ClearProgress.
     Call ClearProgress
+
+    Call ShowReport(report, ok)
+
+End Sub
+
+' Shows the build report WHOLE. VBA's MsgBox drops everything past ~1024
+' characters (the report ran past it once the gate notes grew); WScript.
+' Shell's Popup is the plain Windows message box and has no such cap
+' (owner's request, 2026-09-29). vbSystemModal keeps it on top of Excel.
+' Past REPORT_POPUP_MAX characters - taller than a screen - or when Popup
+' is unavailable, FitReport's log file + MsgBox, as before.
+Private Sub ShowReport(ByVal report As String, ByVal ok As Boolean)
+
+    Const REPORT_POPUP_MAX As Long = 4000
+    Dim sh As Object
+
+    If Len(report) <= REPORT_POPUP_MAX Then
+        On Error Resume Next
+        Set sh = CreateObject("WScript.Shell")
+        If Not sh Is Nothing Then
+            sh.Popup report, 0, "Microsoft Excel", _
+                     IIf(ok, vbInformation, vbExclamation) + vbSystemModal
+            If Err.Number = 0 Then Exit Sub
+        End If
+        On Error GoTo 0
+    End If
 
     MsgBox FitReport(report, SCRIPT_ID), IIf(ok, vbInformation, vbExclamation)
 
@@ -1058,6 +1175,8 @@ Private Function ReadInputs() As String
 
     Call InitSeismicGate
     ReadInputs = InitLiveLoadGate()
+    If Len(ReadInputs) > 0 Then Exit Function
+    ReadInputs = InitMinVerticalGate()
     If Len(ReadInputs) > 0 Then Exit Function
 
     If ws Is Nothing Then
@@ -1694,7 +1813,9 @@ End Function
 '  not live-load cases):
 '    SLS-1..14   serviceability, factors 1.0 / 0.5
 '    ULS-1..14   ultimate, 1.35 permanent / 1.5 / 1.45 / 0.75
-'    ACC-1       accidental (LLacc) - NOT seismic, dropped entirely when
+'    ULS-15..20  minimum vertical (DL/EV 0.90) - only when
+'                MIN_VERTICAL_ACTIVE (INPUT!K17 = 1), 6 more in every count
+'    ACC-1      accidental (LLacc) - NOT seismic, dropped entirely when
 '                LIVE_LOAD_ACTIVE is False (LLacc is its only load)
 '    EQ-1        seismic (EQ lateral pressure only, no ATA inertia) -
 '                only when SEISMIC_ACTIVE
@@ -1755,6 +1876,22 @@ Private Sub GenerateLoadCombinations()
     Call AddCombo("ULS-13", 0, "ST", "DL:1.35,EV2:1.35,EHS2_L:0.75,EHS2_R:0.75,LL:1.45", 1)
     Call AddCombo("ULS-14", 0, "ST", "DL:1.35,EV2:1.35,EHA2_L:0.75,EHA2_R:0.75,LL:1.45", 1)
 
+    ' --- Minimum vertical / maximum horizontal (INPUT!K17 = 1 only) ---
+    ' ULS-1/2/5/6/9/10 with DL and EV at the AASHTO minimum 0.90 and no
+    ' vertical live load (LL1/LL); the horizontal terms keep their factors.
+    ' Named ULS-* so ENV_STR and MIDAS_RESULTS table 1 take them in. With
+    ' live load off, ULS-19/20 lose LSS2_L/LSA2_L and repeat ULS-17/18, as
+    ' SLS-7 repeats SLS-5 (accepted). Gate off: nothing here, every later
+    ' key unchanged.
+    If MIN_VERTICAL_ACTIVE Then
+        Call AddCombo("ULS-15", 0, "ST", "DL:0.9,EV1:0.9,EHS1:1.5,LSS1_L:1.45", 1)
+        Call AddCombo("ULS-16", 0, "ST", "DL:0.9,EV1:0.9,EHS1:1.5", 1)
+        Call AddCombo("ULS-17", 0, "ST", "DL:0.9,EV2:0.9,EHS2_L:1.35,EHS2_R:1.35", 1)
+        Call AddCombo("ULS-18", 0, "ST", "DL:0.9,EV2:0.9,EHA2_L:1.35,EHA2_R:1.35", 1)
+        Call AddCombo("ULS-19", 0, "ST", "DL:0.9,EV2:0.9,EHS2_L:1.35,EHS2_R:1.35,LSS2_L:1.45", 1)
+        Call AddCombo("ULS-20", 0, "ST", "DL:0.9,EV2:0.9,EHA2_L:1.35,EHA2_R:1.35,LSA2_L:1.45", 1)
+    End If
+
     ' --- Accidental and seismic ---
     ' ACC-1 is an accidental (impact) case, not a seismic one, so it is
     ' gated on LIVE_LOAD_ACTIVE, not SEISMIC_ACTIVE - LLacc is its only
@@ -1778,6 +1915,8 @@ Private Sub GenerateLoadCombinations()
     ' --- Envelopes ---
     For i = 1 To 14
         serSpec = serSpec & IIf(i > 1, ",", "") & "SLS-" & i & ":1"
+    Next i
+    For i = 1 To IIf(MIN_VERTICAL_ACTIVE, 20, 14)
         strSpec = strSpec & IIf(i > 1, ",", "") & "ULS-" & i & ":1"
     Next i
 

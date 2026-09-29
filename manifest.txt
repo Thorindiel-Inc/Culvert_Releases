@@ -4,9 +4,9 @@
 culvert-beam-diagram-capture|2026-09-28a|Reads the load-case and combination tables once per run instead of once per picture (about 56 fewer requests on a full run)
 culvert-displacement-contour-capture|2026-09-28b|Reads the load-case and combination tables once per run instead of once per picture (about 56 fewer requests on a full run)
 culvert-load-diagram-capture|2026-09-28a|Reads the load-case and combination tables once per run instead of once per picture (about 56 fewer requests on a full run)
-culvert-model-build|2026-09-28a|Excel calculation is Manual while the build writes cells and always Automatic at the end; Ec fallback (blank MIDAS_INPUT!B43) is now 33 GPa, as the SAP2000 culvert.
+culvert-model-build|2026-09-29a|INPUT!K17 = 1 adds six minimum-vertical ultimate combinations ULS-15..20 (DL/EV x0.90, no vertical live load) to ENV_STR (0 or blank builds as before); the build report is shown whole instead of cut at ~1000 characters
 macro-updater|2026-09-24a|Recognises a password-locked VBA project and says how to unlock it for the session, instead of pointing at the Trust Center setting.
-sap2000-culvert-model-build|2026-09-28a|Comments only: the Ec fallback note now says both culvert builders use 33 GPa; no change in behaviour
+sap2000-culvert-model-build|2026-09-29a|INPUT!K17 = 1 adds the minimum-vertical combinations ULS-15..20 (DL/EV x0.90), as the MIDAS culvert builder; 0 or blank builds exactly as before
 sap2000-wingwall-model-build|2026-09-28a|EQ - 1 / EQ - 2 also carry the other wall's static active pressure (EHA2R / EHA2L), as the MIDAS wingwall builder.
 wingwall-displacement-contour-capture|2026-09-28b|Reads the load-case and combination tables once per run instead of once per picture (about 56 fewer requests on a full run)
 wingwall-load-diagram-capture|2026-09-28c|The RIGHT wall pictures turn with the wall: view = 325 - (INPUT!C22 + C23), 280 on the 15/30 layout; blank or non-number angles fall back to 280 with a warning

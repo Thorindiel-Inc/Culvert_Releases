@@ -59,10 +59,10 @@ Option Explicit
 ' ---------------------------------------------------------------------------
 
 ' Stamped into the report title. Bump with every change to this file.
-Private Const SCRIPT_VERSION As String = "2026-09-28a"
+Private Const SCRIPT_VERSION As String = "2026-09-29a"
 
 ' One line, no "_" continuation, no "|" - read by the updater's manifest.
-Private Const SCRIPT_CHANGELOG As String = "Comments only: the Ec fallback note now says both culvert builders use 33 GPa; no change in behaviour"
+Private Const SCRIPT_CHANGELOG As String = "INPUT!K17 = 1 adds the minimum-vertical combinations ULS-15..20 (DL/EV x0.90), as the MIDAS culvert builder; 0 or blank builds exactly as before"
 
 ' Identifies this module to the updater whatever it was named in Excel.
 Private Const SCRIPT_ID As String = "sap2000-culvert-model-build"
@@ -169,6 +169,16 @@ Private SEISMIC_GATE_KNOWN As Boolean
 ' ---------------------------------------------------------------------------
 Private LIVE_LOAD_ACTIVE As Boolean
 Private LIVE_LOAD_GATE_SOURCE As String
+
+' ---------------------------------------------------------------------------
+'  MIN-VERTICAL GATE - identical to the MIDAS builder (see its header):
+'  INPUT!K17 = 1 adds ULS-15..20 (DL/EV x0.90, no vertical live load) to
+'  the combinations and ENV_STR; 0 or blank -> as before; anything else
+'  stops the build.
+' ---------------------------------------------------------------------------
+Private Const MIN_VERTICAL_GATE_CELL As String = "K17"
+Private MIN_VERTICAL_ACTIVE As Boolean
+Private MIN_VERTICAL_GATE_SOURCE As String
 
 ' Geometry + section inputs (names shared with the copied procedures)
 Private DIM_SLAB_T As Double         ' B4
@@ -278,6 +288,7 @@ Public Sub BuildSap2000Model()
     Dim res As String
     Dim stage As String
     Dim liveLoadErr As String
+    Dim minVertErr As String
 
     report = "SAP2000 culvert model  [" & SCRIPT_VERSION & "]" & vbCrLf & _
              String(40, "-") & vbCrLf
@@ -307,6 +318,18 @@ Public Sub BuildSap2000Model()
              " (" & LIVE_LOAD_GATE_SOURCE & ")." & IIf(LIVE_LOAD_ACTIVE, "", _
              " No LL/LLin/LLacc/LSS2_L/LSA2_L cases or loads, no ACC-1.") & _
              vbCrLf & String(40, "-") & vbCrLf
+
+    stage = "min-vertical gate"
+    minVertErr = InitMinVerticalGate()
+    If Len(minVertErr) > 0 Then
+        MsgBox report & "STOPPED - nothing was built." & vbCrLf & vbCrLf & _
+               minVertErr, vbExclamation
+        Exit Sub
+    End If
+    If MIN_VERTICAL_ACTIVE Then
+        report = report & "NOTE - min-vertical combinations ON (" & MIN_VERTICAL_GATE_SOURCE & _
+                 "): ULS-15..20 (DL/EV x0.90) added to ENV_STR." & vbCrLf & String(40, "-") & vbCrLf
+    End If
 
     stage = "SAP2000 folder"
     folder = SapFolder()
@@ -526,6 +549,54 @@ Private Function IsLiveLoadCase(ByVal nm As String) As Boolean
                       nm = "LSS2_L" Or nm = "LSA2_L")
 End Function
 
+' Reads INPUT!K17 and sets MIN_VERTICAL_ACTIVE/MIN_VERTICAL_GATE_SOURCE.
+' Returns "" when the cell holds 1, 0 or nothing, otherwise a message
+' naming it - the build stops on it, same pattern as InitLiveLoadGate.
+Private Function InitMinVerticalGate() As String
+
+    Dim ws As Worksheet
+    Dim v As Variant
+    Dim s As String
+
+    InitMinVerticalGate = ""
+    ' Reset every run - module-level values survive between runs.
+    MIN_VERTICAL_ACTIVE = False
+    MIN_VERTICAL_GATE_SOURCE = ""
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(PROJECT_SHEET_NAME)
+    On Error GoTo 0
+
+    If ws Is Nothing Then
+        MIN_VERTICAL_GATE_SOURCE = "sheet """ & PROJECT_SHEET_NAME & """ not found, defaulted to OFF"
+        Exit Function
+    End If
+
+    v = ws.Range(MIN_VERTICAL_GATE_CELL).Value
+
+    If IsError(v) Then
+        InitMinVerticalGate = PROJECT_SHEET_NAME & "!" & MIN_VERTICAL_GATE_CELL & _
+                              " (min-vertical combinations) is an error value. Set it to 1, 0 or blank."
+        Exit Function
+    End If
+
+    ' CStr of a whole number has no decimal separator, so "1"/"0" are
+    ' locale-safe; a typed text "1" counts the same as the number.
+    s = Trim$(CStr(v))
+
+    If s = "1" Then
+        MIN_VERTICAL_ACTIVE = True
+        MIN_VERTICAL_GATE_SOURCE = PROJECT_SHEET_NAME & "!" & MIN_VERTICAL_GATE_CELL & " = 1"
+    ElseIf s = "0" Or Len(s) = 0 Then
+        MIN_VERTICAL_GATE_SOURCE = PROJECT_SHEET_NAME & "!" & MIN_VERTICAL_GATE_CELL & " = " & _
+                                   IIf(Len(s) = 0, "(blank)", "0")
+    Else
+        InitMinVerticalGate = PROJECT_SHEET_NAME & "!" & MIN_VERTICAL_GATE_CELL & _
+                              " (min-vertical combinations) is """ & s & """. Set it to 1, 0 or blank."
+    End If
+
+End Function
+
 Private Function ReadInputs() As String
 
     INPUT_FALLBACKS = ""
@@ -540,6 +611,8 @@ Private Function ReadInputs() As String
 
     Call InitSeismicGate
     ReadInputs = InitLiveLoadGate()
+    If Len(ReadInputs) > 0 Then Exit Function
+    ReadInputs = InitMinVerticalGate()
     If Len(ReadInputs) > 0 Then Exit Function
 
     If ws Is Nothing Then
@@ -1080,6 +1153,22 @@ Private Sub GenerateLoadCombinations()
     Call AddCombo("ULS-13", 0, "ST", "DL:1.35,EV2:1.35,EHS2_L:0.75,EHS2_R:0.75,LL:1.45", 1)
     Call AddCombo("ULS-14", 0, "ST", "DL:1.35,EV2:1.35,EHA2_L:0.75,EHA2_R:0.75,LL:1.45", 1)
 
+    ' --- Minimum vertical / maximum horizontal (INPUT!K17 = 1 only) ---
+    ' ULS-1/2/5/6/9/10 with DL and EV at the AASHTO minimum 0.90 and no
+    ' vertical live load (LL1/LL); the horizontal terms keep their factors.
+    ' Named ULS-* so ENV_STR and MIDAS_RESULTS table 1 take them in. With
+    ' live load off, ULS-19/20 lose LSS2_L/LSA2_L and repeat ULS-17/18, as
+    ' SLS-7 repeats SLS-5 (accepted). Gate off: nothing here, every later
+    ' key unchanged.
+    If MIN_VERTICAL_ACTIVE Then
+        Call AddCombo("ULS-15", 0, "ST", "DL:0.9,EV1:0.9,EHS1:1.5,LSS1_L:1.45", 1)
+        Call AddCombo("ULS-16", 0, "ST", "DL:0.9,EV1:0.9,EHS1:1.5", 1)
+        Call AddCombo("ULS-17", 0, "ST", "DL:0.9,EV2:0.9,EHS2_L:1.35,EHS2_R:1.35", 1)
+        Call AddCombo("ULS-18", 0, "ST", "DL:0.9,EV2:0.9,EHA2_L:1.35,EHA2_R:1.35", 1)
+        Call AddCombo("ULS-19", 0, "ST", "DL:0.9,EV2:0.9,EHS2_L:1.35,EHS2_R:1.35,LSS2_L:1.45", 1)
+        Call AddCombo("ULS-20", 0, "ST", "DL:0.9,EV2:0.9,EHA2_L:1.35,EHA2_R:1.35,LSA2_L:1.45", 1)
+    End If
+
     ' --- Accidental and seismic ---
     ' ACC-1 is an accidental (impact) case, not a seismic one, so it is
     ' gated on LIVE_LOAD_ACTIVE, not SEISMIC_ACTIVE - LLacc is its only
@@ -1103,6 +1192,8 @@ Private Sub GenerateLoadCombinations()
     ' --- Envelopes ---
     For i = 1 To 14
         serSpec = serSpec & IIf(i > 1, ",", "") & "SLS-" & i & ":1"
+    Next i
+    For i = 1 To IIf(MIN_VERTICAL_ACTIVE, 20, 14)
         strSpec = strSpec & IIf(i > 1, ",", "") & "ULS-" & i & ":1"
     Next i
 
