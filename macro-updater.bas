@@ -86,16 +86,21 @@ Option Explicit
 '  CONFIG
 ' ---------------------------------------------------------------------------
 
-Private Const SCRIPT_VERSION As String = "2026-09-24a"
+Private Const SCRIPT_VERSION As String = "2026-09-29a"
 
 ' One-line summary of what changed in THIS version, shown when the updater
 ' finds itself stale. One physical line, no "|".
-Private Const SCRIPT_CHANGELOG As String = "Recognises a password-locked VBA project and says how to unlock it for the session, instead of pointing at the Trust Center setting."
+Private Const SCRIPT_CHANGELOG As String = "Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
 ' module name in the VBA project is whatever the user typed.
 Private Const SCRIPT_ID As String = "macro-updater"
+
+' Report window font (ShowReport): 9 pt Segoe UI is the MsgBox font; the
+' window's A- / A+ buttons change it on the spot.
+Private Const REPORT_FONT_NAME As String = "Segoe UI"
+Private Const REPORT_FONT_PT As Long = 9
 
 ' Base URL serving manifest.txt and <id>.bas. No trailing slash.
 ' Points at a SEPARATE PUBLIC releases repo, mirroring how
@@ -224,18 +229,16 @@ Public Sub CheckMidasMacroUpdates()
              String(46, "-") & vbCrLf & report
 
     If Len(trustMsg) > 0 Then
-        MsgBox FitReport("CANNOT CHECK:" & vbCrLf & trustMsg & vbCrLf & vbCrLf & report, SCRIPT_ID), _
-               vbExclamation
+        Call ShowReport("CANNOT CHECK:" & vbCrLf & trustMsg & vbCrLf & vbCrLf & report, False)
         Exit Sub
     End If
 
     If staleCount = 0 And Not selfStale Then
         If okCount = 0 And Len(aheadLog) = 0 Then
-            MsgBox FitReport("No MIDAS modules found in this workbook." & vbCrLf & vbCrLf & _
-                             report, SCRIPT_ID), vbInformation
+            Call ShowReport("No MIDAS modules found in this workbook." & vbCrLf & vbCrLf & _
+                            report, True)
         Else
-            MsgBox FitReport("OK - nothing to update." & vbCrLf & vbCrLf & report, SCRIPT_ID), _
-                   vbInformation
+            Call ShowReport("OK - nothing to update." & vbCrLf & vbCrLf & report, True)
         End If
         Exit Sub
     End If
@@ -337,11 +340,10 @@ Private Sub InstallUpdates(ByVal staleList As String)
     Next i
 
     ' Failures first - MsgBox cuts a long text off at the bottom.
-    MsgBox FitReport("MIDAS macro update" & vbCrLf & String(46, "-") & vbCrLf & _
+    Call ShowReport("MIDAS macro update  [" & SCRIPT_VERSION & "]" & vbCrLf & String(46, "-") & vbCrLf & _
            "Save the workbook to keep the updated code." & vbCrLf & vbCrLf & _
            IIf(failCount > 0, "FAILED (" & failCount & "):" & vbCrLf & failLog & vbCrLf, "") & _
-           IIf(doneCount > 0, "UPDATED (" & doneCount & "):" & vbCrLf & doneLog, ""), SCRIPT_ID), _
-           IIf(failCount > 0, vbExclamation, vbInformation)
+           IIf(doneCount > 0, "UPDATED (" & doneCount & "):" & vbCrLf & doneLog, ""), (failCount = 0))
 
 End Sub
 
@@ -771,5 +773,188 @@ Private Function FitReport(ByVal report As String, ByVal logName As String) As S
     On Error GoTo 0
 
     FitReport = Left$(report, MAX_LEN) & vbCrLf & "..." & vbCrLf & "Full report: " & path
+
+End Function
+
+' ===========================================================================
+'  REPORT WINDOW (shared, byte-identical in every module - see CLAUDE.md)
+' ===========================================================================
+
+' Shows a final report whole, every line, in a small window instead of
+' MsgBox, which cuts text past ~1024 characters and whose font cannot be
+' set (owner's request, 2026-09-29). The text goes to a UTF-8 file in
+' %TEMP% and a hidden PowerShell draws the window; the script deletes both
+' files. The macro does not wait for it. If anything fails on the way, the
+' old MsgBox + FitReport log file is shown instead.
+Private Sub ShowReport(ByVal report As String, ByVal ok As Boolean)
+
+    Dim basePath As String
+    Dim txtPath As String
+    Dim ps1Path As String
+    Dim fileNo As Integer
+    Dim stm As Object
+
+    On Error GoTo UseMsgBox
+
+    basePath = Environ$("TEMP") & "\" & SCRIPT_ID & "_report_" & Format$(Now, "yyyymmdd_hhnnss")
+    txtPath = basePath & ".txt"
+    ps1Path = basePath & ".ps1"
+
+    ' UTF-8: a report can carry non-ASCII names and paths.
+    Set stm = CreateObject("ADODB.Stream")
+    stm.Type = 2
+    stm.Charset = "utf-8"
+    stm.Open
+    stm.WriteText report
+    stm.SaveToFile txtPath, 2
+    stm.Close
+
+    ' The script itself is plain ASCII.
+    fileNo = FreeFile
+    Open ps1Path For Output As #fileNo
+    Print #fileNo, ReportWindowScript(ok)
+    Close #fileNo
+
+    Shell "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & _
+          ps1Path & """ """ & txtPath & """", vbHide
+    Exit Sub
+
+UseMsgBox:
+    MsgBox FitReport(report, SCRIPT_ID), IIf(ok, vbInformation, vbExclamation)
+
+End Sub
+
+' The PowerShell that draws the report window (generated from a tested
+' script - keep it plain ASCII; symbols are [char] codes). DPI-aware, so
+' 9 pt is the size MsgBox shows. The window title is the report's title
+' line minus its [version]. Line styling by prefix: OK / WARN / FAIL / NOTE
+' step lines get a green tick / orange warning / red cross / blue info; a
+' FAILED: / WARNINGS: / SKIPPED / OUT OF DATE / OK: / UP TO DATE / UPDATED
+' heading colours itself and gives its '  - ' items its symbol; gate
+' ON/OFF lines a filled/empty circle; title and verdict bold, dashed rules
+' grey, indented continuation lines grey. A- / A+ zoom; the window fits
+' the text up to 80 % of the screen, scrollbar beyond.
+Private Function ReportWindowScript(ByVal ok As Boolean) As String
+
+    Dim s As String
+
+    s = "param([string]$TextPath)" & vbCrLf
+    s = s & "$ErrorActionPreference = 'Stop'" & vbCrLf
+    s = s & "$text = [IO.File]::ReadAllText($TextPath, [Text.Encoding]::UTF8)" & vbCrLf
+    ' [IO.File]::Delete, not Remove-Item: PowerShell 5.1's Remove-Item rejects the
+    ' 8.3 %TEMP% path (GKAY~1) with a terminating error, which killed the
+    ' script before the window opened (culvert builder 29c, 2026-09-29).
+    s = s & "try { [IO.File]::Delete($TextPath); [IO.File]::Delete($PSCommandPath) } catch { }" & vbCrLf
+    s = s & "Add-Type -AssemblyName System.Windows.Forms, System.Drawing" & vbCrLf
+    s = s & "Add-Type -Namespace CulvertReport -Name Dpi -MemberDefinition '[DllImport(""user32.dll"")] public static extern bool SetProcessDPIAware();'" & vbCrLf
+    s = s & "[void][CulvertReport.Dpi]::SetProcessDPIAware()" & vbCrLf
+    s = s & "[Windows.Forms.Application]::EnableVisualStyles()" & vbCrLf
+    s = s & "$fontName = '" & REPORT_FONT_NAME & "'" & vbCrLf
+    s = s & "$pt = " & REPORT_FONT_PT & vbCrLf
+    s = s & "$plain = New-Object Drawing.Font($fontName, $pt)" & vbCrLf
+    s = s & "$bold = New-Object Drawing.Font($fontName, $pt, [Drawing.FontStyle]::Bold)" & vbCrLf
+    s = s & "$title = New-Object Drawing.Font($fontName, ($pt + 2), [Drawing.FontStyle]::Bold)" & vbCrLf
+    s = s & "$symFont = New-Object Drawing.Font('Segoe UI Symbol', $pt)" & vbCrLf
+    s = s & "$green = [Drawing.Color]::FromArgb(16, 124, 16)" & vbCrLf
+    s = s & "$orange = [Drawing.Color]::FromArgb(200, 122, 0)" & vbCrLf
+    s = s & "$red = [Drawing.Color]::FromArgb(196, 43, 28)" & vbCrLf
+    s = s & "$blue = [Drawing.Color]::FromArgb(0, 90, 158)" & vbCrLf
+    s = s & "$grey = [Drawing.Color]::FromArgb(150, 150, 150)" & vbCrLf
+    s = s & "$ink = [Drawing.SystemColors]::WindowText" & vbCrLf
+    s = s & "$lines = $text -split '\r?\n'" & vbCrLf
+    s = s & "$caption = 'MIDAS macros'" & vbCrLf
+    s = s & "foreach ($l in $lines) { if ($l -match '^(.+?)\s+\[\d{4}-\d{2}-\d{2}\w*\]') { $caption = $matches[1]; break } }" & vbCrLf
+    s = s & "$form = New-Object Windows.Forms.Form" & vbCrLf
+    s = s & "$form.Text = $caption" & vbCrLf
+    s = s & "$form.Icon = [Drawing.SystemIcons]::" & IIf(ok, "Information", "Warning") & vbCrLf
+    s = s & "$form.StartPosition = 'CenterScreen'" & vbCrLf
+    s = s & "$form.TopMost = $true" & vbCrLf
+    s = s & "$form.MinimizeBox = $false" & vbCrLf
+    s = s & "$form.BackColor = [Drawing.SystemColors]::Window" & vbCrLf
+    s = s & "$form.Font = New-Object Drawing.Font($fontName, 9)" & vbCrLf
+    s = s & "$box = New-Object Windows.Forms.RichTextBox" & vbCrLf
+    s = s & "$box.ReadOnly = $true" & vbCrLf
+    s = s & "$box.DetectUrls = $false" & vbCrLf
+    s = s & "$box.WordWrap = $true" & vbCrLf
+    s = s & "$box.ScrollBars = 'Vertical'" & vbCrLf
+    s = s & "$box.BorderStyle = 'None'" & vbCrLf
+    s = s & "$box.BackColor = [Drawing.SystemColors]::Window" & vbCrLf
+    s = s & "$box.Dock = 'Fill'" & vbCrLf
+    s = s & "$box.Font = $plain" & vbCrLf
+    s = s & "$box.TabStop = $false" & vbCrLf
+    s = s & "$nl = [string][char]10" & vbCrLf
+    s = s & "$sb = New-Object Text.StringBuilder" & vbCrLf
+    s = s & "$runs = New-Object Collections.ArrayList" & vbCrLf
+    s = s & "function Add-Run([string]$s, $font, $color) {" & vbCrLf
+    s = s & "  [void]$runs.Add(@($sb.Length, $s.Length, $font, $color))" & vbCrLf
+    s = s & "  [void]$sb.Append($s)" & vbCrLf
+    s = s & "}" & vbCrLf
+    s = s & "function Add-Line($sym, $symColor, [string]$rest, $font, $color) {" & vbCrLf
+    s = s & "  if ($null -eq $color) { $color = $ink }" & vbCrLf
+    s = s & "  if ($sym) { Add-Run ([string]$sym + '  ') $symFont $symColor }" & vbCrLf
+    s = s & "  Add-Run ($rest + $nl) $font $color" & vbCrLf
+    s = s & "}" & vbCrLf
+    s = s & "$tick = [char]0x2714; $cross = [char]0x2716; $warn = [char]0x26A0; $info = [char]0x2139" & vbCrLf
+    s = s & "$ring = [char]0x25CB; $dot = [char]0x25C9; $cycle = [char]0x21BB" & vbCrLf
+    s = s & "$secSym = $null; $secColor = $ink" & vbCrLf
+    s = s & "foreach ($l in $lines) {" & vbCrLf
+    s = s & "  if ($l -match '^.+\s+\[\d{4}-\d{2}-\d{2}\w*\]') { Add-Line $null $ink $l $title }" & vbCrLf
+    s = s & "  elseif ($l -match '^OK   - (.*)$') { Add-Line $tick $green $matches[1] $plain }" & vbCrLf
+    s = s & "  elseif ($l -match '^WARN - (.*)$') { Add-Line $warn $orange $matches[1] $plain }" & vbCrLf
+    s = s & "  elseif ($l -match '^FAIL - (.*)$') { Add-Line $cross $red $matches[1] $plain }" & vbCrLf
+    s = s & "  elseif ($l -match '^NOTE - (.*)$') { Add-Line $info $blue $matches[1] $plain }" & vbCrLf
+    s = s & "  elseif ($l -match '^[-=]{10,}$') { Add-Run (([string][char]0x2500 * 40) + $nl) $plain $grey }" & vbCrLf
+    s = s & "  elseif ($l -match '^(All steps completed|OK - )') { Add-Line $tick $green $l $bold }" & vbCrLf
+    s = s & "  elseif ($l -match '^(STOPPED|CANNOT CHECK)') { Add-Line $cross $red $l $bold }" & vbCrLf
+    s = s & "  elseif ($l -match '^(FAILED|FAIL)\b.*:\s*$') { $secSym = $cross; $secColor = $red; Add-Line $null $ink $l $bold $red }" & vbCrLf
+    s = s & "  elseif ($l -match '^WARNINGS?\b.*:\s*$') { $secSym = $warn; $secColor = $orange; Add-Line $null $ink $l $bold $orange }" & vbCrLf
+    s = s & "  elseif ($l -match '^(SKIPPED|NOT MANAGED|AHEAD OF SERVER)\b.*:\s*$') { $secSym = $ring; $secColor = $grey; Add-Line $null $ink $l $bold $grey }" & vbCrLf
+    s = s & "  elseif ($l -match '^(OUT OF DATE|UPDATER ITSELF)\b.*:\s*$') { $secSym = $cycle; $secColor = $blue; Add-Line $null $ink $l $bold $blue }" & vbCrLf
+    s = s & "  elseif ($l -match '^(OK|UP TO DATE|UPDATED)\b.*:\s*$') { $secSym = $tick; $secColor = $green; Add-Line $null $ink $l $bold $green }" & vbCrLf
+    s = s & "  elseif ($l -match '^\s+- (.*)$' -and $secSym) { Add-Run '    ' $plain $ink; Add-Line $secSym $secColor $matches[1] $plain }" & vbCrLf
+    s = s & "  elseif ($l -match '^\s{4,}\S') { Add-Line $null $ink $l $plain $grey }" & vbCrLf
+    s = s & "  elseif ($l -match '^WARN(ING)?\b') { Add-Line $warn $orange $l $plain }" & vbCrLf
+    s = s & "  elseif ($l -match '^(Seismic|Live load|Min-vertical) ON\b') { Add-Line $dot $blue $l $plain }" & vbCrLf
+    s = s & "  elseif ($l -match '^(Seismic|Live load|Min-vertical) OFF\b') { Add-Line $ring $grey $l $plain }" & vbCrLf
+    s = s & "  elseif ($l -match '^Clean pass.*: OK$') { Add-Line $tick $green $l $plain }" & vbCrLf
+    s = s & "  elseif ($l -match '^\d+ captures?: ') { Add-Line $null $ink $l $bold }" & vbCrLf
+    s = s & "  else { Add-Line $null $ink $l $plain }" & vbCrLf
+    s = s & "}" & vbCrLf
+    s = s & "$box.Text = $sb.ToString()" & vbCrLf
+    s = s & "foreach ($r in $runs) { $box.Select($r[0], $r[1]); $box.SelectionFont = $r[2]; $box.SelectionColor = $r[3] }" & vbCrLf
+    s = s & "$box.Select(0, 0)" & vbCrLf
+    s = s & "$pad = New-Object Windows.Forms.Panel" & vbCrLf
+    s = s & "$pad.Dock = 'Fill'" & vbCrLf
+    s = s & "$pad.Padding = New-Object Windows.Forms.Padding(16, 14, 6, 6)" & vbCrLf
+    s = s & "$pad.Controls.Add($box)" & vbCrLf
+    s = s & "$bar = New-Object Windows.Forms.FlowLayoutPanel" & vbCrLf
+    s = s & "$bar.Dock = 'Bottom'" & vbCrLf
+    s = s & "$bar.FlowDirection = 'RightToLeft'" & vbCrLf
+    s = s & "$bar.AutoSize = $true" & vbCrLf
+    s = s & "$bar.Padding = New-Object Windows.Forms.Padding(8)" & vbCrLf
+    s = s & "$bar.BackColor = [Drawing.SystemColors]::Control" & vbCrLf
+    s = s & "function New-Btn([string]$label, [int]$width) {" & vbCrLf
+    s = s & "  $b = New-Object Windows.Forms.Button; $b.Text = $label; $b.Width = $width; $b.Height = 28; $b" & vbCrLf
+    s = s & "}" & vbCrLf
+    s = s & "$okBtn = New-Btn 'OK' 88" & vbCrLf
+    s = s & "$okBtn.DialogResult = 'OK'" & vbCrLf
+    s = s & "$bigger = New-Btn 'A+' 40" & vbCrLf
+    s = s & "$smaller = New-Btn 'A-' 40" & vbCrLf
+    s = s & "$bigger.Add_Click({ $box.ZoomFactor = [Math]::Min(3.0, $box.ZoomFactor + 0.1) })" & vbCrLf
+    s = s & "$smaller.Add_Click({ $box.ZoomFactor = [Math]::Max(0.6, $box.ZoomFactor - 0.1) })" & vbCrLf
+    s = s & "$bar.Controls.AddRange(@($okBtn, $bigger, $smaller))" & vbCrLf
+    s = s & "$form.Controls.Add($pad)" & vbCrLf
+    s = s & "$form.Controls.Add($bar)" & vbCrLf
+    s = s & "$form.AcceptButton = $okBtn" & vbCrLf
+    s = s & "$form.CancelButton = $okBtn" & vbCrLf
+    s = s & "$area = [Windows.Forms.Screen]::PrimaryScreen.WorkingArea" & vbCrLf
+    s = s & "$need = [Windows.Forms.TextRenderer]::MeasureText($text, $bold)" & vbCrLf
+    s = s & "$w = [Math]::Max(420, [Math]::Min($need.Width + 110, [int]($area.Width * 0.8)))" & vbCrLf
+    s = s & "$h = [Math]::Min($need.Height + $bar.PreferredSize.Height + 70, [int]($area.Height * 0.8))" & vbCrLf
+    s = s & "$form.ClientSize = New-Object Drawing.Size($w, $h)" & vbCrLf
+    s = s & "$form.Add_Shown({ $form.Activate(); $form.ActiveControl = $okBtn; $box.Refresh() })" & vbCrLf
+    s = s & "[void]$form.ShowDialog()" & vbCrLf
+
+    ReportWindowScript = s
 
 End Function
