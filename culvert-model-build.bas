@@ -28,14 +28,14 @@ Option Explicit
 ' so a screenshot of a run does not otherwise say which build produced it -
 ' bump this whenever the file changes and check it matches before
 ' diagnosing anything from a report.
-Private Const SCRIPT_VERSION As String = "2026-09-29e"
+Private Const SCRIPT_VERSION As String = "2026-10-01b"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box"
+Private Const SCRIPT_CHANGELOG As String = "Run record switched on: each build sends one record (inputs, loads, gates, governing section forces; project fields encrypted) to the culvert run database when INPUT!J21/J22 are filled"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -337,6 +337,37 @@ Private Const REPORT_FONT_NAME As String = "Segoe UI"
 Private Const REPORT_FONT_PT As Long = 9
 
 ' ---------------------------------------------------------------------------
+'  RUN RECORD (run database, docs/run-database/) - see RecordRun at the end
+'  of this module. INPUT!J21 = Firebase project ID, J22 = web API key; both
+'  blank = recording off. A failed upload only WARNs.
+'  REC_ENABLED False = nothing is collected or sent (shipped off until the
+'  owner's Firebase project exists). REC_DUMP_BODY True also writes the
+'  body to %TEMP%\<SCRIPT_ID>_record_body.json.
+' ---------------------------------------------------------------------------
+Private Const REC_ENABLED As Boolean = True
+Private Const REC_DUMP_BODY As Boolean = False
+Private Const REC_BUILDER As String = "midas"
+Private Const REC_PROJECT_ID_CELL As String = "J21"
+Private Const REC_API_KEY_CELL As String = "J22"
+' The owner's RSA-3072 PUBLIC key (.NET XML, ONE line) and its key id from
+' scripts/run-database/make_rsa_keys.py. It can only lock, never unlock.
+' Blank = the project fields are left out (key_id "none"), never sent plain.
+Private Const REC_PUBLIC_KEY_XML As String = "<RSAKeyValue><Modulus>8VDzVu3qkUxA2yJqeExds39SzuTXKvKX18ubYRiq71J8nAlPAtgdrUE/Ko8+OryUhNnDTPh14wCS6EJ1D2opFRPlat4WKrMzVI8JK721Wzf9GVmLHUq52/kXK6MgyLPc6bgbkVEU0JI3TdPvjPn9yU1sd31HyJ5Ff0BoKA05O9sht1pxkwZ3YSi6q0U47w+209KACW9cg1w+qGGIocjcZDpAKhs4oEsucVZyMufNOLJfn8BdzsWU/JsN+g5plGs+BLz8eTxExVJ6++12iC8kTJJ7YVNbMfho2oE7b5cwjHSiO5vvQvXBqRVu/MB7OdiwYQBoRaPrPX9F+nI2yIC5G4ylXzvtF56/m+BiD8V8WZoR6YtHPTW8t5y25IlChZIqykYUN5MRnRcRlcwab/2Bj0hbDC0u2iK7cOVaqOT5vpNVJDPM46B3tzow3OaNuZXZ5lR6o2fsC53+hBgRTA2EnagsDDfSPsPahuyimWRhsoFt8gj9c6CfnfS8rdo3NjVB</Modulus><Exponent>AQAB</Exponent></RSAKeyValue>"
+Private Const REC_KEY_ID As String = "04bce0f3fa8473f7"
+Private Const REC_UID_PLACEHOLDER As String = "__REC_UID__"
+Private Const REC_ENCRYPT_TIMEOUT_SEC As Long = 15
+' Refresh, sign-up after a dead refresh token, create, one retry, and one
+' re-sign-in after a 401.
+Private Const REC_MAX_REQUESTS As Long = 5
+' Sign-in cached per Excel session, keyed by project ID + API key.
+Private REC_TOKEN_CACHE As String
+Private REC_TOKEN_UID As String
+Private REC_TOKEN_FOR As String
+Private REC_TOKEN_EXPIRES As Date
+Private Declare PtrSafe Function CoCreateGuid Lib "ole32" (ByRef pguid As Byte) As Long
+Private Declare PtrSafe Sub GetSystemTime Lib "kernel32" (ByRef lpSystemTime As Integer)
+
+' ---------------------------------------------------------------------------
 '  PROGRESS BAR
 '
 '  Drawn in Excel's status bar rather than a UserForm, so this module stays
@@ -636,6 +667,10 @@ Sub BuildCulvertModel()
     Dim vLcom As String, vStld As String
     Dim liveLoadErr As String
     Dim minVertErr As String
+    Dim resultsRes As String, resultsStep As String
+    Dim resultsWritten As Boolean
+    Dim recRunId As String, recStartedAt As String, recRes As String
+    Dim recT0 As Single
 
     Call InitSeismicGate
 
@@ -691,6 +726,14 @@ Sub BuildCulvertModel()
     End If
     report = report & String(40, "-") & vbCrLf
 
+    ' The run record's id and start (after the gate stops: a stopped run
+    ' sends nothing). INPUT_FALLBACKS cleared so a run that fails before
+    ' ReadInputs does not report the previous run's notes.
+    recRunId = RecNewRunId()
+    recStartedAt = RecUtcNow()
+    recT0 = Timer
+    INPUT_FALLBACKS = ""
+
     ' Wipe first, so every PUT below lands in an empty endpoint and the
     ' key/name numbering cannot disagree with whatever was there before.
     ' Deliberately NOT gated on success: a FAIL here usually just means
@@ -739,13 +782,24 @@ Sub BuildCulvertModel()
     If ok Then ok = StepResult(report, Progress("Foundation Springs"), PostFoundationSprings())
     If ok Then ok = StepResult(report, Progress("Element List"), PostNonRigidElementList())
     If ok Then ok = StepResult(report, Progress("Perform Analysis"), PostPerformAnalysis())
-    If ok Then ok = StepResult(report, Progress("Beam Force Results"), PostBeamForceResults())
+    ' Only a results step that returned exactly "" wrote this run's forces;
+    ' otherwise MIDAS_RESULTS may still hold an earlier run's.
+    If ok Then
+        resultsStep = Progress("Beam Force Results")
+        resultsRes = PostBeamForceResults()
+        resultsWritten = (Len(resultsRes) = 0)
+        ok = StepResult(report, resultsStep, resultsRes)
+    End If
 
+    ' Before the report, and on the failure path too - see ClearProgress.
+    Call ClearProgress
+
+    ' Reads the report before the verdict (its last FAIL line names the
+    ' failed step); its own line goes after it.
+    recRes = RecordRun(ok, resultsWritten, report, "", recRunId, recStartedAt, recT0)
 
     report = VerdictFirst(report, ok)
-
-    ' Before the MsgBox, and on the failure path too - see ClearProgress.
-    Call ClearProgress
+    If Len(recRes) > 0 Then Call StepResult(report, "Run record", IIf(recRes = "SENT", "", recRes))
 
     Call ShowReport(report, ok)
 
@@ -3644,4 +3698,1239 @@ Private Function ReportWindowScript(ByVal ok As Boolean) As String
 
     ReportWindowScript = s
 
+End Function
+
+
+' ===========================================================================
+'  RUN RECORD - the run database (docs/run-database/)
+'
+'  After each build, one record of the run - inputs, loads, gates and the
+'  governing section forces, the project fields encrypted - is created in
+'  the owner's Firestore project. scripts/run-database/record_body.py is
+'  the REFERENCE for the body; docs/run-database/recordrun-design-review.md
+'  the list this code follows.
+'
+'  Byte-identical in both culvert builders (the drift test locks every
+'  Rec* procedure); the module-specific value is the Const REC_BUILDER.
+'  Recording never fails a build: RecordRun returns "" (off - no report
+'  line), "SENT" or "WARN: ...". It never uses the MIDAS request helpers,
+'  so the MAPI key cannot reach Google.
+' ===========================================================================
+
+' ok             - the build's verdict
+' resultsWritten - the results step returned exactly "" (else MIDAS_RESULTS
+'                  may still hold an earlier run: no section forces sent)
+' report         - the build report so far (its last FAIL line names the
+'                  failed step), BEFORE VerdictFirst
+' failedStep     - overrides that step name (the SAP builder's crash stage)
+Private Function RecordRun(ByVal ok As Boolean, ByVal resultsWritten As Boolean, _
+                           ByVal report As String, ByVal failedStep As String, _
+                           ByVal runId As String, ByVal startedAt As String, _
+                           ByVal t0 As Single) As String
+
+    Dim projectId As String, apiKey As String
+    Dim cfg As String, body As String, notes As String, res As String
+    Dim finishedAt As String
+    Dim duration As Double
+
+    On Error GoTo Crashed
+
+    If Not REC_ENABLED And Not REC_DUMP_BODY Then Exit Function
+
+    finishedAt = RecUtcNow()
+    duration = RecSecondsSince(t0)
+
+    ' Both cells blank = recording off, no report line.
+    cfg = RecConfig(projectId, apiKey)
+    If Not REC_DUMP_BODY Then
+        If cfg = "OFF" Then Exit Function
+        If Len(cfg) > 0 Then
+            RecordRun = cfg
+            Exit Function
+        End If
+    End If
+
+    Application.StatusBar = "Run record: collecting ..."
+    body = RecBuildBody(ok, resultsWritten, report, failedStep, runId, startedAt, _
+                        finishedAt, duration, notes)
+
+    If REC_DUMP_BODY Then
+        Call RecWriteText(Environ$("TEMP") & "\" & SCRIPT_ID & "_record_body.json", body)
+    End If
+
+    If Not REC_ENABLED Or cfg = "OFF" Then
+        Application.StatusBar = False
+        Exit Function
+    End If
+    If Len(cfg) > 0 Then
+        Application.StatusBar = False
+        RecordRun = cfg
+        Exit Function
+    End If
+
+    Application.StatusBar = "Run record: sending ..."
+    res = RecSend(projectId, apiKey, runId, body)
+    Application.StatusBar = False
+
+    If Len(res) > 0 Then
+        RecordRun = "WARN: not sent - " & res
+    ElseIf Len(notes) > 0 Then
+        RecordRun = "WARN: sent, but" & notes
+    Else
+        RecordRun = "SENT"
+    End If
+    Exit Function
+
+Crashed:
+    RecordRun = "WARN: not sent - VBA error " & Err.Number & " (" & Err.Description & ")."
+    On Error Resume Next
+    Application.StatusBar = False
+
+End Function
+
+' Public test hook: writes this workbook's record body to
+' %TEMP%\<SCRIPT_ID>_record_body.json with a fixed run id and timestamps,
+' as if the build had just succeeded - nothing is sent and no model is
+' touched. tests/ compare it with scripts/run-database/record_body.py.
+Public Sub RecDumpBodyForTest()
+
+    Dim path As String, body As String, notes As String
+
+    Call InitSeismicGate
+    Call InitLiveLoadGate
+    Call InitMinVerticalGate
+
+    body = RecBuildBody(True, True, "", "", "00000000-0000-4000-8000-000000000000", _
+                        "2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z", 0, notes)
+    body = Replace(body, REC_UID_PLACEHOLDER, "test-uid")
+    path = Environ$("TEMP") & "\" & SCRIPT_ID & "_record_body.json"
+    Call RecWriteText(path, body)
+
+    MsgBox "Run record body written to " & path & IIf(Len(notes) > 0, vbCrLf & "Notes:" & notes, ""), _
+           vbInformation, SCRIPT_ID
+
+End Sub
+
+' INPUT!J21 (project ID) and J22 (web API key). Returns "" when both are
+' usable, "OFF" when both are blank, otherwise a WARN.
+Private Function RecConfig(ByRef projectId As String, ByRef apiKey As String) As String
+
+    Dim ws As Worksheet
+    Dim blank As Boolean
+    Dim i As Long
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets("INPUT")
+    On Error GoTo 0
+    If ws Is Nothing Then
+        RecConfig = "OFF"
+        Exit Function
+    End If
+
+    projectId = Trim$(RecCellText(ws.Range(REC_PROJECT_ID_CELL).Value2, blank))
+    apiKey = Trim$(RecCellText(ws.Range(REC_API_KEY_CELL).Value2, blank))
+
+    If Len(projectId) = 0 And Len(apiKey) = 0 Then
+        RecConfig = "OFF"
+    ElseIf Len(projectId) = 0 Or Len(apiKey) = 0 Then
+        RecConfig = "WARN: not sent - only one of INPUT!" & REC_PROJECT_ID_CELL & " (Firebase project ID) " & _
+                    "and INPUT!" & REC_API_KEY_CELL & " (web API key) is filled in. Fill in both, " & _
+                    "or clear both to switch recording off."
+    Else
+        If Len(projectId) < 6 Or Len(projectId) > 30 Then RecConfig = "bad"
+        For i = 1 To Len(projectId)
+            If Not (Mid$(projectId, i, 1) Like "[a-z0-9-]") Then RecConfig = "bad"
+        Next i
+        If Len(RecConfig) > 0 Then
+            RecConfig = "WARN: not sent - INPUT!" & REC_PROJECT_ID_CELL & " is not a Firebase project ID " & _
+                        "(6-30 characters: lower-case letters, digits, hyphens)."
+        End If
+    End If
+
+End Function
+
+' ---------------------------------------------------------------------------
+'  The body: Firestore REST typed JSON {"fields": {...}}, ASCII only. The
+'  uid is left as REC_UID_PLACEHOLDER (it is known only after sign-in).
+'  Every cell is read here, BEFORE the encryption and the requests, which
+'  both wait with DoEvents.
+' ---------------------------------------------------------------------------
+Private Function RecBuildBody(ByVal ok As Boolean, ByVal resultsWritten As Boolean, _
+                              ByVal report As String, ByVal failedStep As String, _
+                              ByVal runId As String, ByVal startedAt As String, _
+                              ByVal finishedAt As String, ByVal duration As Double, _
+                              ByRef notes As String) As String
+
+    Dim f As String, failed As String, sections As String, plain As String
+    Dim token As String, keyId As String, encErr As String
+    Dim fb As Variant, arr As String
+
+    notes = ""
+
+    ' failed_step: the step name only (the line can carry MIDAS's raw body).
+    If Not ok Then
+        failed = failedStep
+        If Len(failed) = 0 Then failed = RecLastFailStep(report)
+        If Len(failed) = 0 Then failed = "unknown"
+        failed = Left$(failed, 200)
+    End If
+
+    sections = ""
+    If ok And resultsWritten Then
+        sections = RecSections(notes)
+    End If
+
+    plain = RecProjectJson()
+
+    ' Everything is read - only now the encryption (it waits with DoEvents).
+    encErr = RecEncrypt(plain, token, keyId)
+    plain = ""
+    If Len(encErr) > 0 Then
+        token = ""
+        keyId = "none"
+        notes = notes & " the project fields were not encrypted (" & encErr & ") and were left out."
+    End If
+
+    Call RecAdd(f, "schema_version", RecTInt(1))
+    Call RecAdd(f, "run_id", RecTStr(runId))
+    Call RecAdd(f, "uid", RecTStr(REC_UID_PLACEHOLDER))
+    Call RecAdd(f, "source", RecTStr("manual"))
+    Call RecAdd(f, "builder", RecTStr(REC_BUILDER))
+    Call RecAdd(f, "script_id", RecTStr(SCRIPT_ID))
+    Call RecAdd(f, "script_version", RecTStr(SCRIPT_VERSION))
+    Call RecAdd(f, "status", RecTStr(IIf(ok, "ok", "fail")))
+    Call RecAdd(f, "failed_step", IIf(ok, RecTNull(), RecTStr(failed)))
+    Call RecAdd(f, "started_at", "{""timestampValue"":""" & startedAt & """}")
+    Call RecAdd(f, "finished_at", "{""timestampValue"":""" & finishedAt & """}")
+    Call RecAdd(f, "duration_s", RecTDouble(Round(duration, 2)))
+    Call RecAdd(f, "step_durations_s", RecTMap(""))
+
+    ' The builder's own default-value notes (" Ec (...) ..., used 33000000.").
+    arr = ""
+    For Each fb In Split(Trim$(INPUT_FALLBACKS), ". ")
+        fb = Trim$(fb)
+        If Right$(fb, 1) = "." Then fb = Left$(fb, Len(fb) - 1)
+        If Len(fb) > 0 Then
+            If Len(arr) > 0 Then arr = arr & ","
+            arr = arr & RecTStr(CStr(fb))
+        End If
+    Next fb
+    Call RecAdd(f, "fallbacks", "{""arrayValue"":{""values"":[" & arr & "]}}")
+
+    Call RecAdd(f, "sweep_id", RecTNull())
+    Call RecAdd(f, "sweep_point", RecTNull())
+    Call RecAdd(f, "program_version", RecTNull())
+    Call RecAdd(f, "key_id", RecTStr(keyId))
+    Call RecAdd(f, "project_enc", RecTStr(token))
+    Call RecAdd(f, "inputs", RecTMap(RecInputs()))
+    Call RecAdd(f, "loads", RecTMap(RecLoads()))
+    Call RecAdd(f, "gates", RecTMap(RecGates()))
+    Call RecAdd(f, "sections", RecTMap(sections))
+
+    RecBuildBody = "{""fields"":{" & f & "}}"
+
+End Function
+
+' "FAIL - Load cases: [Error] ..." (the LAST such line) -> "Load cases".
+Private Function RecLastFailStep(ByVal report As String) As String
+
+    Dim p As Long, q As Long
+    Dim s As String
+
+    p = InStrRev(report, "FAIL - ")
+    If p = 0 Then Exit Function
+    s = Mid$(report, p + 7)
+    q = InStr(s, vbCr)
+    If q = 0 Then q = InStr(s, vbLf)
+    If q > 0 Then s = Left$(s, q - 1)
+    q = InStr(s, ": ")
+    If q > 0 Then s = Left$(s, q - 1)
+    RecLastFailStep = Trim$(s)
+
+End Function
+
+' ---- plaintext collectors: explicit cell lists, never a project cell ----
+
+' schema_v1.INPUT_CELLS, in order: name|sheet|cell|kind (d = double,
+' s = text, m = the DD1-DD3 map of RecSeismicMap).
+Private Function RecInputCellList() As String
+    Dim s As String
+    s = "phi_deg|INPUT|B3|d;gamma_fill_kN_m3|INPUT|B4|d;gamma_concrete_kN_m3|INPUT|B5|d;"
+    s = s & "gamma_ballast_kN_m3|INPUT|B6|d;k0|INPUT|B7|d;ka|INPUT|B8|d;kv_kN_m3|INPUT|B9|d;"
+    s = s & "t_slab_m|INPUT|B12|d;t_wall_m|INPUT|B13|d;t_found_m|INPUT|B14|d;"
+    s = s & "haunch_v_m|INPUT|B15|d;haunch_h_m|INPUT|B16|d;fill_m|INPUT|B19|d;"
+    s = s & "ballast_m|INPUT|B20|d;cover_m|INPUT|B21|d;span_m|INPUT|B22|d;height_m|INPUT|B23|d;"
+    s = s & "toe_m|INPUT|B24|d;live_load|INPUT|B26|s;fc_MPa|INPUT|B27|d;fy_MPa|INPUT|B28|d;"
+    s = s & "ss|INPUT|G|m;s1|INPUT|H|m;soil_class|INPUT|J4|s;seismic_level|1_GIRIS|AE60|s;"
+    s = s & "sds_design|1_GIRIS|AE61|d;mesh_divisions|INPUT|K15|d;min_vertical|INPUT|K17|d"
+    RecInputCellList = s
+End Function
+
+' schema_v1.LOAD_CELLS, in order: name|MIDAS_INPUT cell, all double.
+Private Function RecLoadCellList() As String
+    Dim s As String
+    s = "ev1|B21;ev2|B22;ehs1_t|B23;ehs1_b|B24;eha1_t|B25;eha1_b|B26;ehs2_t|B27;ehs2_b|B28;"
+    s = s & "eha2_t|B29;eha2_b|B30;ll1|B31;ll|B32;lss2|B33;eq_t|B34;eq_b|B35;ev2_side|B36;"
+    s = s & "ev1_side|B37;lss1|B38;llacc|B39;lsa2|B40;kh|B15;spring_kN_m3|B42;ec_kN_m2|B43;"
+    s = s & "haunch_v_used_m|B8;haunch_h_used_m|B9"
+    RecLoadCellList = s
+End Function
+
+Private Function RecInputs() As String
+
+    Dim item As Variant, p() As String
+    Dim f As String, blank As Boolean, txt As String
+
+    For Each item In Split(RecInputCellList(), ";")
+        p = Split(item, "|")
+        Select Case p(3)
+            Case "d"
+                Call RecAdd(f, p(0), RecTDouble(RecCell(p(1), p(2))))
+            Case "s"
+                txt = RecCellText(RecCell(p(1), p(2)), blank)
+                Call RecAdd(f, p(0), IIf(blank, RecTNull(), RecTStr(txt)))
+            Case "m"
+                Call RecAdd(f, p(0), RecTMap(RecSeismicMap(p(1), p(2))))
+        End Select
+    Next item
+    RecInputs = f
+
+End Function
+
+' DD1..DD3 = rows 4..6 of one column (Ss: G, S1: H).
+Private Function RecSeismicMap(ByVal sheetName As String, ByVal col As String) As String
+    Dim f As String, k As Long
+    For k = 1 To 3
+        Call RecAdd(f, "DD" & k, RecTDouble(RecCell(sheetName, col & (3 + k))))
+    Next k
+    RecSeismicMap = f
+End Function
+
+Private Function RecLoads() As String
+    Dim item As Variant, p() As String, f As String
+    For Each item In Split(RecLoadCellList(), ";")
+        p = Split(item, "|")
+        Call RecAdd(f, p(0), RecTDouble(RecCell("MIDAS_INPUT", p(1))))
+    Next item
+    RecLoads = f
+End Function
+
+' The gates as this run applied them. seismic_source is rebuilt from the
+' cells with a locale-free number format (the report's text uses Format$,
+' which writes 0,769 on a Turkish Windows).
+Private Function RecGates() As String
+
+    Dim f As String, src As String
+    Dim pv As Variant, ov As Variant, qv As Variant
+    Dim cv As Variant, hv As Variant, tv As Variant, bv As Variant
+    Dim ratio As Variant
+
+    ov = RecCell("1_GIRIS", "O81")
+    qv = RecCell("1_GIRIS", "Q81")
+    cv = RecCell("INPUT", "B21")
+    hv = RecCell("INPUT", "B23")
+    tv = RecCell("INPUT", "B12")
+    bv = RecCell("INPUT", "B14")
+    ratio = Empty
+    If RecIsNum(cv) And RecIsNum(hv) And RecIsNum(tv) And RecIsNum(bv) Then
+        If CDbl(hv) + CDbl(tv) + CDbl(bv) > 0 Then ratio = CDbl(cv) / (CDbl(hv) + CDbl(tv) + CDbl(bv))
+    End If
+
+    src = SEISMIC_GATE_SOURCE
+    If SEISMIC_GATE_OVERRIDE = -1 Then
+        pv = RecCell("1_GIRIS", "P81")
+        If VarType(pv) = vbString Then pv = Trim$(pv) Else pv = ""
+        If pv = "<" Or pv = ">" Then
+            src = "1_GIRIS!P81 = """ & pv & """"
+        ElseIf RecIsNum(ov) And RecIsNum(qv) Then
+            src = "1_GIRIS!O81 = " & RecFixed3(CDbl(ov)) & IIf(CDbl(ov) < CDbl(qv), " < ", " >= ") & _
+                  RecFixed3(CDbl(qv))
+        ElseIf Not IsEmpty(ratio) Then
+            src = "Z/H = INPUT!B21/(B23+B12+B14) = " & RecFixed3(CDbl(ratio)) & _
+                  IIf(ratio < 0.5, " < ", " >= ") & "0.500"
+        End If
+    End If
+
+    Call RecAdd(f, "seismic_active", RecTBool(SEISMIC_ACTIVE))
+    Call RecAdd(f, "seismic_source", RecTStr(src))
+    If RecIsNum(ov) Then
+        Call RecAdd(f, "zh_ratio", RecTDouble(ov))
+    Else
+        Call RecAdd(f, "zh_ratio", RecTDouble(ratio))
+    End If
+    Call RecAdd(f, "live_load_active", RecTBool(LIVE_LOAD_ACTIVE))
+    Call RecAdd(f, "min_vertical_active", RecTBool(MIN_VERTICAL_ACTIVE))
+    RecGates = f
+
+End Function
+
+' ---- the section forces ----
+
+' KESIT|elem|part|face|mode|V elem|V part|As,req cell|phi Vc cell -
+' analysis/governing.py's SECTION_POSITIONS / SHEAR_POSITIONS and
+' schema_v1's 6_DONATI cells. elem/part are the fallback when the summary
+' block's typed position is blank or unreadable; no V position = no shear.
+Private Function RecSectionList() As String
+    Dim s As String
+    s = "1-1|19|J|UST|min|19|M|M9|J64;2-2|19|I|UST|min|19|I|M10|J65;3-3|23|I|ALT|max|||M11|;"
+    s = s & "4-4|4|I|ALT|max|4|M|M12|J66;5-5|39|I|UST|min|||M13|;6-6|30|J|DIS|min|30|M|M14|J67;"
+    s = s & "7-7|27|I|DIS|min|||M15|;8-8|26|I|IC|max|||M16|"
+    RecSectionList = s
+End Function
+
+' Per face, over MIDAS_RESULTS table 1 (B:J from row 3): the largest
+' moment of the face's tension sign over ULS-* + EQ-1 (m_str) / SLS-*
+' (m_ser) at the summary block's position, Nu from the same row; V = the
+' largest |Shear-z| over ULS-* + EQ-1. Strict < / > - the first row wins a
+' tie. "" (an empty map) when table 1 does not hold exactly this run's
+' combinations. Returns the map's fields.
+Private Function RecSections(ByRef notes As String) As String
+
+    Dim ws As Worksheet, wsD As Worksheet
+    Dim data As Variant, sm As Variant
+    Dim lastRow As Long, i As Long, n As Long, skipped As Long
+    Dim rElem() As Long, rComb() As String, rPos() As String
+    Dim rAx() As Double, rVz() As Double, rMy() As Double
+    Dim have As Object, want As Object, k As Variant
+    Dim pos As String, comb As String
+    Dim item As Variant, p() As String, r As Long
+    Dim f As String, sec As String, sh As String, calcDone As Boolean
+    Dim mStr As String, mSer As String, vv As String
+    Dim eM As Long, pM As String, eS As Long, pS As String, eV As Long, pV As String
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets("MIDAS_RESULTS")
+    Set wsD = ThisWorkbook.Worksheets("6_DONATI")
+    On Error GoTo 0
+    If ws Is Nothing Then
+        notes = notes & " no section forces (no MIDAS_RESULTS sheet)."
+        Exit Function
+    End If
+
+    lastRow = ws.Cells(ws.Rows.Count, 2).End(xlUp).Row
+    If lastRow < 3 Then
+        notes = notes & " no section forces (MIDAS_RESULTS table 1 is empty)."
+        Exit Function
+    End If
+    data = ws.Range("B3:J" & lastRow).Value2
+    sm = ws.Range("Q3:AI10").Value2
+
+    n = 0
+    ReDim rElem(1 To UBound(data, 1)), rComb(1 To UBound(data, 1)), rPos(1 To UBound(data, 1))
+    ReDim rAx(1 To UBound(data, 1)), rVz(1 To UBound(data, 1)), rMy(1 To UBound(data, 1))
+    For i = 1 To UBound(data, 1)
+        If IsEmpty(data(i, 1)) Then Exit For
+        pos = ""
+        If VarType(data(i, 3)) = vbString Then
+            If Left$(Trim$(data(i, 3)), 1) = "I" Then pos = "I"
+            If Left$(Trim$(data(i, 3)), 1) = "J" Then pos = "J"
+            If Trim$(data(i, 3)) = "2/4" Then pos = "M"
+        End If
+        If Len(pos) > 0 And RecIsWhole(data(i, 1)) And VarType(data(i, 2)) = vbString And _
+           RecIsNum(data(i, 4)) And RecIsNum(data(i, 5)) And RecIsNum(data(i, 6)) And _
+           RecIsNum(data(i, 7)) And RecIsNum(data(i, 8)) And RecIsNum(data(i, 9)) Then
+            n = n + 1
+            rElem(n) = CLng(data(i, 1))
+            rComb(n) = Trim$(data(i, 2))
+            rPos(n) = pos
+            rAx(n) = CDbl(data(i, 4))
+            rVz(n) = CDbl(data(i, 6))
+            rMy(n) = CDbl(data(i, 8))
+        Else
+            skipped = skipped + 1
+        End If
+    Next i
+
+    ' Table 1 must hold exactly this run's SLS-/ULS-/EQ-1 combinations.
+    Set have = CreateObject("Scripting.Dictionary")
+    Set want = CreateObject("Scripting.Dictionary")
+    For i = 1 To n
+        have(rComb(i)) = True
+    Next i
+    For i = 1 To 14
+        want("SLS-" & i) = True
+    Next i
+    For i = 1 To IIf(MIN_VERTICAL_ACTIVE, 20, 14)
+        want("ULS-" & i) = True
+    Next i
+    If SEISMIC_ACTIVE Then want("EQ-1") = True
+    comb = ""
+    If have.Count <> want.Count Then comb = "x"
+    For Each k In want.Keys
+        If Not have.Exists(k) Then comb = "x"
+    Next k
+    If Len(comb) > 0 Then
+        notes = notes & " no section forces (MIDAS_RESULTS table 1 holds other combinations than this run's)."
+        Exit Function
+    End If
+
+    ' The sheet's own values only from a finished recalculation.
+    On Error Resume Next
+    Application.Calculate
+    calcDone = (Application.CalculationState = xlDone)
+    On Error GoTo 0
+
+    r = 0
+    For Each item In Split(RecSectionList(), ";")
+        p = Split(item, "|")
+        r = r + 1
+        sec = p(0)
+
+        ' Positions typed in the summary block (row r): R/T, X/Z, AD/AF.
+        eM = RecSummaryElem(sm(r, 2), CLng(p(1))): pM = RecSummaryPart(sm(r, 4), p(2))
+        eS = RecSummaryElem(sm(r, 8), CLng(p(1))): pS = RecSummaryPart(sm(r, 10), p(2))
+        If Len(p(5)) > 0 Then
+            eV = RecSummaryElem(sm(r, 14), CLng(p(5))): pV = RecSummaryPart(sm(r, 16), p(6))
+        End If
+
+        mStr = RecGoverning(rElem, rComb, rPos, rMy, rAx, n, eM, pM, "STR", p(4), "value_kNm")
+        mSer = RecGoverning(rElem, rComb, rPos, rMy, rAx, n, eS, pS, "SER", p(4), "value_kNm")
+
+        sh = ""
+        If calcDone Then
+            Call RecAdd(sh, "m_str_value", RecTDouble(sm(r, 6)))
+            Call RecAdd(sh, "m_str_comb", RecTTrimText(sm(r, 3)))
+            Call RecAdd(sh, "m_ser_value", RecTDouble(sm(r, 12)))
+            Call RecAdd(sh, "m_ser_comb", RecTTrimText(sm(r, 9)))
+            If Len(p(5)) > 0 Then
+                Call RecAdd(sh, "v_value", RecTDouble(sm(r, 18)))
+                Call RecAdd(sh, "v_comb", RecTTrimText(sm(r, 15)))
+            Else
+                Call RecAdd(sh, "v_value", RecTNull())
+                Call RecAdd(sh, "v_comb", RecTNull())
+            End If
+            If wsD Is Nothing Then
+                Call RecAdd(sh, "as_req_mm2", RecTNull())
+                Call RecAdd(sh, "phi_vc_kN", RecTNull())
+            Else
+                Call RecAdd(sh, "as_req_mm2", RecTDouble(wsD.Range(p(7)).Value2))
+                If Len(p(8)) > 0 Then
+                    Call RecAdd(sh, "phi_vc_kN", RecTDouble(wsD.Range(p(8)).Value2))
+                Else
+                    Call RecAdd(sh, "phi_vc_kN", RecTNull())
+                End If
+            End If
+        Else
+            Call RecAdd(sh, "m_str_value", RecTNull())
+            Call RecAdd(sh, "m_str_comb", RecTNull())
+            Call RecAdd(sh, "m_ser_value", RecTNull())
+            Call RecAdd(sh, "m_ser_comb", RecTNull())
+            Call RecAdd(sh, "v_value", RecTNull())
+            Call RecAdd(sh, "v_comb", RecTNull())
+            Call RecAdd(sh, "as_req_mm2", RecTNull())
+            Call RecAdd(sh, "phi_vc_kN", RecTNull())
+        End If
+
+        vv = ""
+        Call RecAdd(vv, "face", RecTStr(p(3)))
+        Call RecAdd(vv, "element", RecTInt(eM))
+        Call RecAdd(vv, "part", RecTStr(pM))
+        Call RecAdd(vv, "m_str", mStr)
+        Call RecAdd(vv, "m_ser", mSer)
+        If Len(p(5)) > 0 Then
+            Call RecAdd(vv, "v", RecGoverning(rElem, rComb, rPos, rVz, rAx, n, eV, pV, "STR", "abs", "value_kN"))
+        End If
+        Call RecAdd(vv, "sheet", RecTMap(sh))
+        Call RecAdd(f, sec, RecTMap(vv))
+    Next item
+
+    If Not calcDone Then notes = notes & " the sheet's own section values were left out (recalculation not finished)."
+    RecSections = f
+
+End Function
+
+' The governing row of one section position: limitState "STR" (ULS-* and
+' EQ-1) or "SER" (SLS-*); mode "min" / "max" (signed) or "abs". A typed
+' map, or null when no row matches.
+Private Function RecGoverning(ByRef rElem() As Long, ByRef rComb() As String, ByRef rPos() As String, _
+                              ByRef rVal() As Double, ByRef rAx() As Double, ByVal n As Long, _
+                              ByVal elemNo As Long, ByVal pos As String, ByVal limitState As String, _
+                              ByVal mode As String, ByVal valueKey As String) As String
+
+    Dim i As Long, best As Long
+    Dim keep As Boolean, better As Boolean
+    Dim f As String
+
+    best = 0
+    For i = 1 To n
+        If rElem(i) = elemNo And rPos(i) = pos Then
+            If limitState = "STR" Then
+                keep = (Left$(rComb(i), 4) = "ULS-" Or rComb(i) = "EQ-1")
+            Else
+                keep = (Left$(rComb(i), 4) = "SLS-")
+            End If
+            If keep Then
+                If best = 0 Then
+                    better = True
+                ElseIf mode = "min" Then
+                    better = (rVal(i) < rVal(best))
+                ElseIf mode = "max" Then
+                    better = (rVal(i) > rVal(best))
+                Else
+                    better = (Abs(rVal(i)) > Abs(rVal(best)))
+                End If
+                If better Then best = i
+            End If
+        End If
+    Next i
+
+    If best = 0 Then
+        RecGoverning = RecTNull()
+        Exit Function
+    End If
+    Call RecAdd(f, valueKey, RecTDouble(rVal(best)))
+    Call RecAdd(f, "comb", RecTStr(rComb(best)))
+    Call RecAdd(f, "element", RecTInt(rElem(best)))
+    Call RecAdd(f, "part", RecTStr(rPos(best)))
+    Call RecAdd(f, "nu_kN", RecTDouble(rAx(best)))
+    RecGoverning = RecTMap(f)
+
+End Function
+
+' A summary-block element cell: a whole number, else the fallback.
+Private Function RecSummaryElem(ByVal v As Variant, ByVal fallback As Long) As Long
+    If RecIsWhole(v) Then RecSummaryElem = CLng(v) Else RecSummaryElem = fallback
+End Function
+
+' A summary-block part cell: I... / J... / 2/4 / M, or the number 0.5 (the
+' sheet types 0.5 for the middle) - VarType, never CStr (0,5 in Turkish).
+Private Function RecSummaryPart(ByVal v As Variant, ByVal fallback As String) As String
+    RecSummaryPart = fallback
+    If RecIsNum(v) Then
+        If Abs(CDbl(v) - 0.5) < 0.000000000001 Then RecSummaryPart = "M"
+    ElseIf VarType(v) = vbString Then
+        If Left$(Trim$(v), 1) = "I" Then
+            RecSummaryPart = "I"
+        ElseIf Left$(Trim$(v), 1) = "J" Then
+            RecSummaryPart = "J"
+        ElseIf Trim$(v) = "2/4" Or Trim$(v) = "M" Then
+            RecSummaryPart = "M"
+        End If
+    End If
+End Function
+
+' ---- the project fields (the ONLY collector of project cells) ----
+
+' One JSON object (raw UTF-8 text, it never leaves the computer
+' unencrypted) - schema_v1.PROJECT_FIELDS, in order.
+Private Function RecProjectJson() As String
+
+    Dim item As Variant, p() As String
+    Dim s As String, txt As String, blank As Boolean
+    Dim sh As Object
+
+    For Each item In Split("project_type|G9;project_number|G8;project_part|G11;km|G12;" & _
+                           "title|G13;engineer|N15;revision|N16", ";")
+        p = Split(item, "|")
+        txt = RecCellText(RecCell("INPUT", p(1)), blank)
+        If Len(s) > 0 Then s = s & ","
+        s = s & """" & p(0) & """:" & IIf(blank, "null", """" & RecJsonText(txt, False) & """")
+    Next item
+
+    ' WScript.Shell reads the environment as Unicode (Environ$ is ANSI).
+    Set sh = CreateObject("WScript.Shell")
+    s = s & ",""workbook"":""" & RecJsonText(ThisWorkbook.Name, False) & """"
+    s = s & ",""windows_user"":""" & RecJsonText(sh.ExpandEnvironmentStrings("%USERNAME%"), False) & """"
+    s = s & ",""computer"":""" & RecJsonText(sh.ExpandEnvironmentStrings("%COMPUTERNAME%"), False) & """"
+    RecProjectJson = "{" & s & "}"
+
+End Function
+
+' Locks the project fields as a "CF1" token (scripts/run-database/
+' encrypt_fields.ps1, run by PowerShell/.NET). The plaintext goes through a
+' UTF-8 temp file that the script deletes (and this code again), never the
+' command line. Returns "" or the reason; on any failure nothing is sent in
+' its place - never the plaintext.
+Private Function RecEncrypt(ByVal plain As String, ByRef token As String, ByRef keyId As String) As String
+
+    Dim fso As Object, wmi As Object, startup As Object
+    Dim base As String, inPath As String, outPath As String, ps1Path As String
+    Dim psExe As String, cmd As String, outText As String
+    Dim pid As Variant, rc As Long
+    Dim t0 As Single, tw As Single
+
+    token = ""
+    keyId = "none"
+    If Len(REC_PUBLIC_KEY_XML) = 0 Or Len(REC_KEY_ID) <> 16 Then
+        RecEncrypt = "no public key in REC_PUBLIC_KEY_XML"
+        Exit Function
+    End If
+
+    On Error GoTo Failed
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    base = Environ$("TEMP") & "\" & SCRIPT_ID & "_rec_" & Replace(RecNewRunId(), "-", "")
+    inPath = base & "_in.txt"
+    outPath = base & "_out.txt"
+    ps1Path = base & ".ps1"
+
+    Call RecWriteText(inPath, plain)
+    Call RecWriteText(ps1Path, Replace(Replace(RecEncryptScript(), "__PUBLIC_KEY_XML__", _
+                      REC_PUBLIC_KEY_XML), "__KEY_ID__", REC_KEY_ID))
+
+    psExe = Environ$("WINDIR") & "\System32\WindowsPowerShell\v1.0\powershell.exe"
+    cmd = """" & psExe & """ -NoProfile -NonInteractive -ExecutionPolicy Bypass -File """ & _
+          ps1Path & """ """ & inPath & """ """ & outPath & """"
+    Set wmi = GetObject("winmgmts:\\.\root\cimv2")
+    Set startup = wmi.Get("Win32_ProcessStartup").SpawnInstance_
+    startup.ShowWindow = 0
+    rc = wmi.Get("Win32_Process").Create(cmd, Null, startup, pid)
+    If rc <> 0 Then
+        RecEncrypt = "PowerShell did not start, WMI code " & rc
+        GoTo Cleanup
+    End If
+
+    ' Wait for OUR process only; on a timeout end it and nothing else.
+    t0 = Timer
+    Do
+        If wmi.ExecQuery("SELECT ProcessId FROM Win32_Process WHERE ProcessId = " & pid).Count = 0 Then Exit Do
+        If RecSecondsSince(t0) > REC_ENCRYPT_TIMEOUT_SEC Then
+            Call RecEndProcess(wmi, pid)
+            RecEncrypt = "PowerShell did not finish within " & REC_ENCRYPT_TIMEOUT_SEC & " s"
+            GoTo Cleanup
+        End If
+        tw = Timer
+        Do While RecSecondsSince(tw) < 0.2
+            DoEvents
+        Loop
+    Loop
+
+    outText = ""
+    If fso.FileExists(outPath) Then outText = Trim$(RecReadText(outPath))
+    outText = Replace(Replace(outText, vbCr, ""), vbLf, "")
+    If Left$(outText, 7) = "OK|CF1:" And Len(outText) - 3 <= 4000 Then
+        token = Mid$(outText, 4)
+        keyId = REC_KEY_ID
+    ElseIf Left$(outText, 5) = "FAIL|" Then
+        RecEncrypt = "PowerShell: " & Left$(Mid$(outText, 6), 200)
+    Else
+        RecEncrypt = "PowerShell gave no usable answer"
+    End If
+
+Cleanup:
+    On Error Resume Next
+    If fso.FileExists(inPath) Then fso.DeleteFile inPath, True
+    If fso.FileExists(outPath) Then fso.DeleteFile outPath, True
+    If fso.FileExists(ps1Path) Then fso.DeleteFile ps1Path, True
+    Exit Function
+
+Failed:
+    RecEncrypt = "VBA error " & Err.Number & " (" & Err.Description & ")"
+    token = ""
+    keyId = "none"
+    Resume Cleanup
+
+End Function
+
+Private Sub RecEndProcess(ByVal wmi As Object, ByVal pid As Variant)
+    Dim proc As Object
+    On Error Resume Next
+    For Each proc In wmi.ExecQuery("SELECT * FROM Win32_Process WHERE ProcessId = " & pid)
+        proc.Terminate
+    Next proc
+End Sub
+
+' The PowerShell that locks the project fields: scripts/run-database/
+' encrypt_fields.ps1 from its param( line on, generated from that file
+' (tests/verify_record_run.py compares them). The two placeholders are
+' replaced by RecEncrypt.
+Private Function RecEncryptScript() As String
+
+    Dim s As String
+
+    s = s & "param(" & vbCrLf
+    s = s & "    [Parameter(Mandatory = $true, Position = 0)][string]$InFile," & vbCrLf
+    s = s & "    [Parameter(Mandatory = $true, Position = 1)][string]$OutFile" & vbCrLf
+    s = s & ")" & vbCrLf
+    s = s & "$ErrorActionPreference = 'Stop'" & vbCrLf
+    s = s & "" & vbCrLf
+    s = s & "$PublicKeyXml = '__PUBLIC_KEY_XML__'" & vbCrLf
+    s = s & "$KeyId = '__KEY_ID__'" & vbCrLf
+    s = s & "" & vbCrLf
+    s = s & "function Write-Result([string]$line) {" & vbCrLf
+    s = s & "    [IO.File]::WriteAllText($OutFile, $line, [Text.Encoding]::ASCII)" & vbCrLf
+    s = s & "}" & vbCrLf
+    s = s & "" & vbCrLf
+    s = s & "$rsa = $null; $aes = $null; $enc = $null; $hmac = $null; $rng = $null" & vbCrLf
+    s = s & "$k = $null" & vbCrLf
+    s = s & "try {" & vbCrLf
+    s = s & "    if ($PublicKeyXml.StartsWith('__') -or $KeyId.StartsWith('__')) {" & vbCrLf
+    s = s & "        throw 'public key placeholders were not replaced'" & vbCrLf
+    s = s & "    }" & vbCrLf
+    s = s & "    if ($KeyId -notmatch '^[0-9a-f]{16}$') { throw ""bad key id '$KeyId'"" }" & vbCrLf
+    s = s & "" & vbCrLf
+    s = s & "    # ReadAllText with UTF8 drops a BOM; re-encode WITHOUT one." & vbCrLf
+    s = s & "    $text = [IO.File]::ReadAllText($InFile, [Text.Encoding]::UTF8)" & vbCrLf
+    s = s & "    $plain = (New-Object Text.UTF8Encoding($false)).GetBytes($text)" & vbCrLf
+    s = s & "" & vbCrLf
+    s = s & "    $rng = New-Object Security.Cryptography.RNGCryptoServiceProvider" & vbCrLf
+    s = s & "    $k = New-Object byte[] 64" & vbCrLf
+    s = s & "    $rng.GetBytes($k)" & vbCrLf
+    s = s & "    $iv = New-Object byte[] 16" & vbCrLf
+    s = s & "    $rng.GetBytes($iv)" & vbCrLf
+    s = s & "    $kEnc = New-Object byte[] 32" & vbCrLf
+    s = s & "    $kMac = New-Object byte[] 32" & vbCrLf
+    s = s & "    [Array]::Copy($k, 0, $kEnc, 0, 32)" & vbCrLf
+    s = s & "    [Array]::Copy($k, 32, $kMac, 0, 32)" & vbCrLf
+    s = s & "" & vbCrLf
+    s = s & "    $rsa = New-Object Security.Cryptography.RSACng" & vbCrLf
+    s = s & "    $rsa.FromXmlString($PublicKeyXml)" & vbCrLf
+    s = s & "    if ($rsa.KeySize -lt 3072) { throw ""public key is only $($rsa.KeySize) bits"" }" & vbCrLf
+    s = s & "    $w = $rsa.Encrypt($k, [Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)" & vbCrLf
+    s = s & "" & vbCrLf
+    s = s & "    $aes = [Security.Cryptography.Aes]::Create()" & vbCrLf
+    s = s & "    $aes.Mode = [Security.Cryptography.CipherMode]::CBC" & vbCrLf
+    s = s & "    $aes.Padding = [Security.Cryptography.PaddingMode]::PKCS7" & vbCrLf
+    s = s & "    $aes.KeySize = 256" & vbCrLf
+    s = s & "    $aes.Key = $kEnc" & vbCrLf
+    s = s & "    $aes.IV = $iv" & vbCrLf
+    s = s & "    $enc = $aes.CreateEncryptor()" & vbCrLf
+    s = s & "    $c = $enc.TransformFinalBlock($plain, 0, $plain.Length)" & vbCrLf
+    s = s & "" & vbCrLf
+    s = s & "    $body = 'CF1:' + $KeyId + ':' + [Convert]::ToBase64String($w) + ':' +" & vbCrLf
+    s = s & "        [Convert]::ToBase64String($iv) + ':' + [Convert]::ToBase64String($c)" & vbCrLf
+    s = s & "    $hmac = New-Object Security.Cryptography.HMACSHA256 (, $kMac)" & vbCrLf
+    s = s & "    $t = $hmac.ComputeHash([Text.Encoding]::ASCII.GetBytes($body))" & vbCrLf
+    s = s & "" & vbCrLf
+    s = s & "    Write-Result ('OK|' + $body + ':' + [Convert]::ToBase64String($t))" & vbCrLf
+    s = s & "    $code = 0" & vbCrLf
+    s = s & "}" & vbCrLf
+    s = s & "catch {" & vbCrLf
+    s = s & "    $msg = ($_.Exception.Message -replace '[\r\n|]+', ' ').Trim()" & vbCrLf
+    s = s & "    try { Write-Result ('FAIL|' + $msg) } catch { }" & vbCrLf
+    s = s & "    $code = 1" & vbCrLf
+    s = s & "}" & vbCrLf
+    s = s & "finally {" & vbCrLf
+    s = s & "    if ($k) { [Array]::Clear($k, 0, $k.Length) }" & vbCrLf
+    s = s & "    if ($kEnc) { [Array]::Clear($kEnc, 0, $kEnc.Length) }" & vbCrLf
+    s = s & "    if ($kMac) { [Array]::Clear($kMac, 0, $kMac.Length) }" & vbCrLf
+    s = s & "    foreach ($o in @($enc, $aes, $hmac, $rsa, $rng)) { if ($o) { $o.Dispose() } }" & vbCrLf
+    s = s & "    # Never Remove-Item: it fails on the 8.3 %TEMP% path (CLAUDE.md)." & vbCrLf
+    s = s & "    try { if ([IO.File]::Exists($InFile)) { [IO.File]::Delete($InFile) } } catch { }" & vbCrLf
+    s = s & "}" & vbCrLf
+    s = s & "exit $code" & vbCrLf
+    RecEncryptScript = s
+
+End Function
+
+' ---- sending ----
+
+' Signs in (anonymous; cached token, else the refresh token kept in
+' %APPDATA%\CulvertDB, else a new sign-up) and creates runs/<runId>.
+' Returns "" when Firestore confirmed the document, otherwise the reason.
+' At most REC_MAX_REQUESTS requests; tokens, the API key and the URLs never
+' go into the reason.
+Private Function RecSend(ByVal projectId As String, ByVal apiKey As String, _
+                         ByVal runId As String, ByVal body As String) As String
+
+    Dim idToken As String, uid As String, res As String
+    Dim url As String, docPath As String, resp As String
+    Dim status As Long, nReq As Long
+
+    res = RecSignIn(projectId, apiKey, False, idToken, uid, nReq)
+    If Len(res) > 0 Then
+        RecSend = res
+        Exit Function
+    End If
+
+    url = "https://firestore.googleapis.com/v1/projects/" & projectId & _
+          "/databases/(default)/documents/runs?documentId=" & runId
+    docPath = """projects/" & projectId & "/databases/(default)/documents/runs/" & runId & """"
+
+    Call RecPost(url, "application/json", Replace(body, REC_UID_PLACEHOLDER, uid), idToken, status, resp, nReq)
+    If status = 200 And InStr(resp, docPath) > 0 Then Exit Function
+
+    If status = 0 Then
+        ' The first attempt may have landed before the connection broke:
+        ' only on this retry does 409 (already exists) count as sent.
+        Call RecPost(url, "application/json", Replace(body, REC_UID_PLACEHOLDER, uid), idToken, status, resp, nReq)
+        If status = 200 And InStr(resp, docPath) > 0 Then Exit Function
+        If status = 409 Then Exit Function
+    ElseIf status = 401 Then
+        res = RecSignIn(projectId, apiKey, True, idToken, uid, nReq)
+        If Len(res) > 0 Then
+            RecSend = res
+            Exit Function
+        End If
+        Call RecPost(url, "application/json", Replace(body, REC_UID_PLACEHOLDER, uid), idToken, status, resp, nReq)
+        If status = 200 And InStr(resp, docPath) > 0 Then Exit Function
+    End If
+
+    RecSend = RecHttpProblem("the database", status, resp)
+
+End Function
+
+' idToken + uid for this project, from the cache, the refresh token or a
+' new anonymous sign-up. forceRefresh skips the cache (after a 401).
+Private Function RecSignIn(ByVal projectId As String, ByVal apiKey As String, _
+                           ByVal forceRefresh As Boolean, ByRef idToken As String, _
+                           ByRef uid As String, ByRef nReq As Long) As String
+
+    Dim cacheFor As String, refreshTok As String, newRefresh As String
+    Dim resp As String, msg As String, expires As String
+    Dim status As Long
+
+    cacheFor = projectId & "|" & apiKey
+    If Not forceRefresh And REC_TOKEN_FOR = cacheFor And Len(REC_TOKEN_CACHE) > 0 And _
+       Now < REC_TOKEN_EXPIRES Then
+        idToken = REC_TOKEN_CACHE
+        uid = REC_TOKEN_UID
+        Exit Function
+    End If
+    REC_TOKEN_CACHE = ""
+    REC_TOKEN_UID = ""
+    REC_TOKEN_FOR = ""
+
+    refreshTok = RecReadToken(projectId)
+    If Len(refreshTok) > 0 Then
+        Call RecPost("https://securetoken.googleapis.com/v1/token?key=" & apiKey, _
+                     "application/x-www-form-urlencoded", _
+                     "grant_type=refresh_token&refresh_token=" & RecUrlEncode(refreshTok), "", _
+                     status, resp, nReq)
+        If status = 200 Then
+            idToken = RecJsonValue(resp, "id_token")
+            newRefresh = RecJsonValue(resp, "refresh_token")
+            expires = RecJsonValue(resp, "expires_in")
+            uid = RecJsonValue(resp, "user_id")
+        Else
+            msg = RecJsonValue(resp, "message")
+            If status <> 400 Or Not (Left$(msg, 21) = "INVALID_REFRESH_TOKEN" Or _
+               Left$(msg, 14) = "USER_NOT_FOUND" Or Left$(msg, 13) = "TOKEN_EXPIRED") Then
+                RecSignIn = RecHttpProblem("sign-in", status, resp)
+                Exit Function
+            End If
+        End If
+    End If
+
+    If Len(idToken) = 0 Then
+        Call RecPost("https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=" & apiKey, _
+                     "application/json", "{""returnSecureToken"":true}", "", status, resp, nReq)
+        If status <> 200 Then
+            RecSignIn = RecHttpProblem("anonymous sign-in", status, resp)
+            Exit Function
+        End If
+        idToken = RecJsonValue(resp, "idToken")
+        newRefresh = RecJsonValue(resp, "refreshToken")
+        expires = RecJsonValue(resp, "expiresIn")
+        uid = RecJsonValue(resp, "localId")
+    End If
+
+    If Len(idToken) = 0 Or Len(uid) = 0 Then
+        RecSignIn = "sign-in answered without a token."
+        Exit Function
+    End If
+    If Len(newRefresh) > 0 And newRefresh <> refreshTok Then Call RecSaveToken(projectId, newRefresh)
+
+    REC_TOKEN_CACHE = idToken
+    REC_TOKEN_UID = uid
+    REC_TOKEN_FOR = cacheFor
+    REC_TOKEN_EXPIRES = Now + (IIf(Val(expires) > 600, Val(expires), 600) - 300) / 86400#
+
+End Function
+
+' One POST with its own WinHTTP client (never the MIDAS one, which carries
+' the MAPI key). status 0 = no answer (resp = the reason), -1 = the request
+' cap was reached.
+Private Sub RecPost(ByVal url As String, ByVal contentType As String, ByVal body As String, _
+                    ByVal bearer As String, ByRef status As Long, ByRef resp As String, _
+                    ByRef nReq As Long)
+
+    Dim http As Object
+
+    status = 0
+    resp = ""
+    If nReq >= REC_MAX_REQUESTS Then
+        status = -1
+        resp = "request limit reached"
+        Exit Sub
+    End If
+    nReq = nReq + 1
+
+    On Error GoTo NoAnswer
+    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+    http.SetTimeouts 5000, 5000, 10000, 10000
+    http.Open "POST", url, False
+    http.SetRequestHeader "Content-Type", contentType
+    If Len(bearer) > 0 Then http.SetRequestHeader "Authorization", "Bearer " & bearer
+    http.Send body
+    status = http.Status
+    resp = http.ResponseText
+    Exit Sub
+
+NoAnswer:
+    status = 0
+    resp = "no answer: " & Err.Description
+
+End Sub
+
+' A short reason for the report - Google's error message, never the URL.
+Private Function RecHttpProblem(ByVal what As String, ByVal status As Long, ByVal resp As String) As String
+
+    Dim msg As String
+
+    If status <= 0 Then
+        RecHttpProblem = what & ": " & Left$(Trim$(Replace(Replace(resp, vbCr, " "), vbLf, " ")), 150)
+        If status = 0 Then RecHttpProblem = RecHttpProblem & " (offline?)"
+        Exit Function
+    End If
+    msg = Left$(RecJsonValue(resp, "message"), 150)
+    RecHttpProblem = what & " answered HTTP " & status & IIf(Len(msg) > 0, " - " & msg, "")
+    Select Case status
+        Case 400
+            If InStr(msg, "API key") > 0 Then RecHttpProblem = RecHttpProblem & " (check INPUT!" & REC_API_KEY_CELL & ")"
+            If InStr(msg, "OPERATION_NOT_ALLOWED") > 0 Then RecHttpProblem = RecHttpProblem & _
+                " (turn on anonymous sign-in in the Firebase console)"
+        Case 403
+            RecHttpProblem = RecHttpProblem & " (refused - the security rules, or a restricted API key)"
+        Case 404
+            RecHttpProblem = RecHttpProblem & " (check INPUT!" & REC_PROJECT_ID_CELL & " and that the database exists)"
+        Case 409
+            RecHttpProblem = RecHttpProblem & " (run id already exists)"
+    End Select
+
+End Function
+
+' The refresh token of this computer, %APPDATA%\CulvertDB\<project>.token
+' (FSO / ADODB - VBA's Open cannot take a Turkish user name).
+Private Function RecTokenPath(ByVal projectId As String) As String
+    RecTokenPath = CreateObject("WScript.Shell").ExpandEnvironmentStrings("%APPDATA%") & _
+                   "\CulvertDB\" & projectId & ".token"
+End Function
+
+Private Function RecReadToken(ByVal projectId As String) As String
+    Dim path As String
+    On Error GoTo NoToken
+    path = RecTokenPath(projectId)
+    If CreateObject("Scripting.FileSystemObject").FileExists(path) Then
+        RecReadToken = Trim$(Replace(Replace(Replace(RecReadText(path), ChrW(65279), ""), vbCr, ""), vbLf, ""))
+    End If
+    Exit Function
+NoToken:
+    RecReadToken = ""
+End Function
+
+Private Sub RecSaveToken(ByVal projectId As String, ByVal tok As String)
+    Dim fso As Object, folder As String
+    On Error Resume Next
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    folder = fso.GetParentFolderName(RecTokenPath(projectId))
+    If Not fso.FolderExists(folder) Then fso.CreateFolder folder
+    Call RecWriteText(RecTokenPath(projectId), tok)
+End Sub
+
+' ---- small helpers ----
+
+' A cell's .Value2, or Empty when the sheet or cell cannot be read.
+Private Function RecCell(ByVal sheetName As String, ByVal addr As String) As Variant
+    On Error GoTo Unreadable
+    RecCell = ThisWorkbook.Worksheets(sheetName).Range(addr).Value2
+    Exit Function
+Unreadable:
+    RecCell = Empty
+End Function
+
+' Text of a cell value as record_body.cell_text: 140 -> "140", 0.5 ->
+' "0.5" (locale-free), blank / error -> blank.
+Private Function RecCellText(ByVal v As Variant, ByRef blank As Boolean) As String
+    blank = False
+    If IsEmpty(v) Or IsError(v) Or IsNull(v) Then
+        blank = True
+    ElseIf VarType(v) = vbBoolean Then
+        RecCellText = IIf(v, "True", "False")
+    ElseIf RecIsWhole(v) Then
+        RecCellText = Format$(v, "0")
+    ElseIf RecIsNum(v) Then
+        RecCellText = JsonNum(CDbl(v))
+    Else
+        RecCellText = CStr(v)
+    End If
+End Function
+
+Private Function RecIsNum(ByVal v As Variant) As Boolean
+    Select Case VarType(v)
+        Case vbDouble, vbSingle, vbInteger, vbLong, vbCurrency, vbDecimal
+            RecIsNum = True
+    End Select
+End Function
+
+Private Function RecIsWhole(ByVal v As Variant) As Boolean
+    If RecIsNum(v) Then
+        If Abs(CDbl(v)) < 1000000000# Then RecIsWhole = (CDbl(v) = Fix(CDbl(v)))
+    End If
+End Function
+
+' 0.7692 -> "0.769" whatever the Windows number format.
+Private Function RecFixed3(ByVal x As Double) As String
+    Dim n As Double, s As String
+    n = Round(Abs(x) * 1000)
+    s = Format$(n, "0")
+    Do While Len(s) < 4
+        s = "0" & s
+    Loop
+    RecFixed3 = IIf(x < 0 And n > 0, "-", "") & Left$(s, Len(s) - 3) & "." & Right$(s, 3)
+End Function
+
+Private Sub RecAdd(ByRef acc As String, ByVal fieldName As String, ByVal typed As String)
+    If Len(acc) > 0 Then acc = acc & ","
+    acc = acc & """" & fieldName & """:" & typed
+End Sub
+
+Private Function RecTNull() As String
+    RecTNull = "{""nullValue"":null}"
+End Function
+
+Private Function RecTInt(ByVal n As Long) As String
+    RecTInt = "{""integerValue"":""" & CStr(n) & """}"
+End Function
+
+' doubleValue for a number (whole numbers too), null for anything else.
+Private Function RecTDouble(ByVal v As Variant) As String
+    If RecIsNum(v) Then
+        RecTDouble = "{""doubleValue"":" & JsonNum(CDbl(v)) & "}"
+    Else
+        RecTDouble = RecTNull()
+    End If
+End Function
+
+Private Function RecTStr(ByVal s As String) As String
+    RecTStr = "{""stringValue"":""" & RecJsonText(s, True) & """}"
+End Function
+
+Private Function RecTTrimText(ByVal v As Variant) As String
+    If VarType(v) = vbString Then RecTTrimText = RecTStr(Trim$(v)) Else RecTTrimText = RecTNull()
+End Function
+
+Private Function RecTBool(ByVal b As Boolean) As String
+    RecTBool = "{""booleanValue"":" & IIf(b, "true", "false") & "}"
+End Function
+
+Private Function RecTMap(ByVal fields As String) As String
+    If Len(fields) = 0 Then
+        RecTMap = "{""mapValue"":{}}"
+    Else
+        RecTMap = "{""mapValue"":{""fields"":{" & fields & "}}}"
+    End If
+End Function
+
+' JSON string contents. asciiOnly: every character above 126 as \uXXXX
+' (the request body); otherwise non-ASCII stays as is (the UTF-8 file
+' that is encrypted).
+Private Function RecJsonText(ByVal s As String, ByVal asciiOnly As Boolean) As String
+    Dim i As Long, c As Long, out As String
+    For i = 1 To Len(s)
+        c = AscW(Mid$(s, i, 1))
+        If c < 0 Then c = c + 65536
+        If c = 34 Then
+            out = out & "\"""
+        ElseIf c = 92 Then
+            out = out & "\\"
+        ElseIf c < 32 Or (asciiOnly And c > 126) Then
+            out = out & "\u" & Right$("000" & LCase$(Hex$(c)), 4)
+        Else
+            out = out & Mid$(s, i, 1)
+        End If
+    Next i
+    RecJsonText = out
+End Function
+
+' The value of "key" in a Google JSON answer (string or bare number); "" if
+' absent. Enough for the flat sign-in answers and error messages.
+Private Function RecJsonValue(ByVal json As String, ByVal key As String) As String
+    Dim p As Long, c As String, out As String
+    p = InStr(json, """" & key & """")
+    If p = 0 Then Exit Function
+    p = InStr(p + Len(key) + 2, json, ":")
+    If p = 0 Then Exit Function
+    p = p + 1
+    Do While p <= Len(json) And InStr(" " & vbTab & vbCr & vbLf, Mid$(json, p, 1)) > 0
+        p = p + 1
+    Loop
+    If Mid$(json, p, 1) = """" Then
+        p = p + 1
+        Do While p <= Len(json)
+            c = Mid$(json, p, 1)
+            If c = "\" Then
+                p = p + 1
+                c = Mid$(json, p, 1)
+                If c = "n" Then c = " "
+            ElseIf c = """" Then
+                Exit Do
+            End If
+            out = out & c
+            p = p + 1
+        Loop
+    Else
+        Do While p <= Len(json) And InStr(",}] " & vbCr & vbLf, Mid$(json, p, 1)) = 0
+            out = out & Mid$(json, p, 1)
+            p = p + 1
+        Loop
+    End If
+    RecJsonValue = out
+End Function
+
+Private Function RecUrlEncode(ByVal s As String) As String
+    Dim i As Long, c As String, out As String
+    For i = 1 To Len(s)
+        c = Mid$(s, i, 1)
+        If c Like "[A-Za-z0-9._~-]" Then
+            out = out & c
+        Else
+            out = out & "%" & Right$("0" & Hex$(AscW(c) And 255), 2)
+        End If
+    Next i
+    RecUrlEncode = out
+End Function
+
+' A random UUID (CoCreateGuid; VBA's Rnd repeats per session, and a repeated
+' id would be refused by the database as "already exists").
+Private Function RecNewRunId() As String
+    Dim g(0 To 15) As Byte, i As Long, s As String
+    If CoCreateGuid(g(0)) <> 0 Then
+        Randomize
+        For i = 0 To 15
+            g(i) = Int(Rnd * 256)
+        Next i
+    End If
+    g(6) = (g(6) And 15) Or 64
+    g(8) = (g(8) And 63) Or 128
+    For i = 0 To 15
+        If i = 4 Or i = 6 Or i = 8 Or i = 10 Then s = s & "-"
+        s = s & Right$("0" & LCase$(Hex$(g(i))), 2)
+    Next i
+    RecNewRunId = s
+End Function
+
+' Now in UTC, RFC 3339 "YYYY-MM-DDTHH:MM:SSZ" (Now is local time).
+Private Function RecUtcNow() As String
+    Dim st(0 To 7) As Integer
+    Call GetSystemTime(st(0))
+    RecUtcNow = Format$(st(0), "0000") & "-" & Format$(st(1), "00") & "-" & Format$(st(3), "00") & _
+                "T" & Format$(st(4), "00") & ":" & Format$(st(5), "00") & ":" & Format$(st(6), "00") & "Z"
+End Function
+
+Private Function RecSecondsSince(ByVal t0 As Single) As Double
+    RecSecondsSince = Timer - t0
+    If RecSecondsSince < 0 Then RecSecondsSince = RecSecondsSince + 86400#
+End Function
+
+' UTF-8 (ADODB writes a BOM, which every reader here drops).
+Private Sub RecWriteText(ByVal path As String, ByVal txt As String)
+    Dim st As Object
+    Set st = CreateObject("ADODB.Stream")
+    st.Type = 2
+    st.Charset = "utf-8"
+    st.Open
+    st.WriteText txt
+    st.SaveToFile path, 2
+    st.Close
+End Sub
+
+Private Function RecReadText(ByVal path As String) As String
+    Dim st As Object
+    Set st = CreateObject("ADODB.Stream")
+    st.Type = 2
+    st.Charset = "utf-8"
+    st.Open
+    st.LoadFromFile path
+    RecReadText = st.ReadText
+    st.Close
 End Function
