@@ -28,14 +28,14 @@ Option Explicit
 ' so a screenshot of a run does not otherwise say which build produced it -
 ' bump this whenever the file changes and check it matches before
 ' diagnosing anything from a report.
-Private Const SCRIPT_VERSION As String = "2026-10-01b"
+Private Const SCRIPT_VERSION As String = "2026-10-05a"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Run record switched on: each build sends one record (inputs, loads, gates, governing section forces; project fields encrypted) to the culvert run database when INPUT!J21/J22 are filled"
+Private Const SCRIPT_CHANGELOG As String = "Fallback Ec (used only when the Ec cell is blank or invalid) is now 32 GPa, TS500 C30"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -100,7 +100,7 @@ Private Const MATERIAL_DAMP_RATIO As Double = 0.05
 Private Const MATERIAL_POISN As Double = 0.2
 Private Const MATERIAL_THERMAL As Double = 0.00001
 Private Const MATERIAL_MASS As Double = 0
-Private Const MATERIAL_ELAST_DEFAULT As Double = 33000000#  ' fallback if B43 is blank/invalid (33 GPa, as the SAP2000 culvert)
+Private Const MATERIAL_ELAST_DEFAULT As Double = 32000000#  ' fallback if B43 is blank/invalid (32 GPa, TS500 C30; as the SAP2000 culvert)
 Private Const MATERIAL_DEN_DEFAULT As Double = 25           ' fallback if INPUT!B5 is blank/invalid
 
 ' Every *SECTION row is "DBUSER ... SB, 2, <depth>, 1, 0 x8" - a solid
@@ -3905,7 +3905,7 @@ Private Function RecBuildBody(ByVal ok As Boolean, ByVal resultsWritten As Boole
     Call RecAdd(f, "duration_s", RecTDouble(Round(duration, 2)))
     Call RecAdd(f, "step_durations_s", RecTMap(""))
 
-    ' The builder's own default-value notes (" Ec (...) ..., used 33000000.").
+    ' The builder's own default-value notes (" Ec (...) ..., used 32000000.").
     arr = ""
     For Each fb In Split(Trim$(INPUT_FALLBACKS), ". ")
         fb = Trim$(fb)

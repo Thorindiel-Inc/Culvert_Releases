@@ -30,14 +30,14 @@ Option Explicit
 ' and the code actually running can silently diverge, and a fix that
 ' looks ineffective is very often just not re-imported yet. Check this
 ' matches before diagnosing anything from a report screenshot.
-Private Const SCRIPT_VERSION As String = "2026-09-29a"
+Private Const SCRIPT_VERSION As String = "2026-10-05a"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box"
+Private Const SCRIPT_CHANGELOG As String = "Fallback Ec (used only when the Ec cell is blank or invalid) is now 32 GPa, TS500 C30"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -149,7 +149,7 @@ Private Const MATERIAL_POISN As Double = 0.2
 Private Const MATERIAL_THERMAL As Double = 0.00001
 Private Const MATERIAL_DEN As Double = 25
 Private Const MATERIAL_MASS As Double = 0
-Private Const MATERIAL_ELAST_DEFAULT As Double = 26291000#  ' fallback if B19 is blank/invalid
+Private Const MATERIAL_ELAST_DEFAULT As Double = 32000000#  ' fallback if B19 is blank/invalid (32 GPa, TS500 C30)
 Private Const CELL_MATERIAL_ELAST As String = "B19"
 Private MATERIAL_ELAST As Double     ' "INPUT"!B19 (Ec), falls back to MATERIAL_ELAST_DEFAULT
 ' Defaults substituted for missing inputs this run, reported as a WARN on

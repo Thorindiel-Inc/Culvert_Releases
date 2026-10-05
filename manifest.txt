@@ -4,11 +4,11 @@
 culvert-beam-diagram-capture|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box
 culvert-displacement-contour-capture|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box
 culvert-load-diagram-capture|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box
-culvert-model-build|2026-10-01b|Run record switched on: each build sends one record (inputs, loads, gates, governing section forces; project fields encrypted) to the culvert run database when INPUT!J21/J22 are filled
+culvert-model-build|2026-10-05a|Fallback Ec (used only when the Ec cell is blank or invalid) is now 32 GPa, TS500 C30
 macro-updater|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box
-sap2000-culvert-model-build|2026-10-01b|Run record switched on: each build sends one record (inputs, loads, gates, governing section forces; project fields encrypted) to the culvert run database when INPUT!J21/J22 are filled
-sap2000-wingwall-model-build|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box
+sap2000-culvert-model-build|2026-10-05a|Fallback Ec (used only when the Ec cell is blank or invalid) is now 32 GPa, TS500 C30
+sap2000-wingwall-model-build|2026-10-05a|Fallback Ec (used only when the Ec cell is blank or invalid) is now 32 GPa, TS500 C30
 wingwall-displacement-contour-capture|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box
 wingwall-load-diagram-capture|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box
-wingwall-model-build|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box
+wingwall-model-build|2026-10-05a|Fallback Ec (used only when the Ec cell is blank or invalid) is now 32 GPa, TS500 C30
 wingwall-plate-forces-capture|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box

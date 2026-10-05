@@ -45,8 +45,8 @@ Option Explicit
 '    - load-case names lose their "_" (EHS2_L -> EHS2L, as the reference
 '      names them); combination names are kept exactly as in MIDAS
 '    - built through the API (2026-09-24), replacing the .$2k text file
-'  Ec is MIDAS_INPUT!B43, falling back to 33 GPa (EN C30/37, the reference's
-'  value) - the same fallback as the MIDAS culvert builder (since 2026-09-28).
+'  Ec is MIDAS_INPUT!B43, falling back to 32 GPa (TS500 C30, 2026-10-05;
+'  was 33) - the same fallback as the MIDAS culvert builder.
 '
 '  No restraints are written: the foundation springs are the supports, as
 '  in the reference. Design-only data of the old text file (column rebar,
@@ -59,10 +59,10 @@ Option Explicit
 ' ---------------------------------------------------------------------------
 
 ' Stamped into the report title. Bump with every change to this file.
-Private Const SCRIPT_VERSION As String = "2026-10-01b"
+Private Const SCRIPT_VERSION As String = "2026-10-05a"
 
 ' One line, no "_" continuation, no "|" - read by the updater's manifest.
-Private Const SCRIPT_CHANGELOG As String = "Run record switched on: each build sends one record (inputs, loads, gates, governing section forces; project fields encrypted) to the culvert run database when INPUT!J21/J22 are filled"
+Private Const SCRIPT_CHANGELOG As String = "Fallback Ec (used only when the Ec cell is blank or invalid) is now 32 GPa, TS500 C30"
 
 ' Identifies this module to the updater whatever it was named in Excel.
 Private Const SCRIPT_ID As String = "sap2000-culvert-model-build"
@@ -122,7 +122,7 @@ Private Const MATERIAL_NAME As String = "C30/37"
 Private Const MATERIAL_FC As Double = 30000#          ' kN/m2
 Private Const MATERIAL_POISN As Double = 0.2
 Private Const MATERIAL_THERMAL As Double = 0.00001
-Private Const MATERIAL_ELAST_DEFAULT As Double = 33000000#  ' fallback if B43 is blank/invalid
+Private Const MATERIAL_ELAST_DEFAULT As Double = 32000000#  ' fallback if B43 is blank/invalid
 Private Const MATERIAL_DEN_DEFAULT As Double = 25           ' fallback if INPUT!B5 is blank/invalid
 Private Const GRAVITY_ACCEL As Double = 9.80665
 
@@ -1887,7 +1887,7 @@ Failed:
 
 End Function
 
-' C30/37: Ec (MIDAS_INPUT!B43, else 33 GPa), unit weight (INPUT!B5), fc -
+' C30/37: Ec (MIDAS_INPUT!B43, else 32 GPa), unit weight (INPUT!B5), fc -
 ' the values the .$2k's material tables carried. SAP derives G and the mass.
 Private Sub EmitMaterial()
 
@@ -2928,7 +2928,7 @@ Private Function RecBuildBody(ByVal ok As Boolean, ByVal resultsWritten As Boole
     Call RecAdd(f, "duration_s", RecTDouble(Round(duration, 2)))
     Call RecAdd(f, "step_durations_s", RecTMap(""))
 
-    ' The builder's own default-value notes (" Ec (...) ..., used 33000000.").
+    ' The builder's own default-value notes (" Ec (...) ..., used 32000000.").
     arr = ""
     For Each fb In Split(Trim$(INPUT_FALLBACKS), ". ")
         fb = Trim$(fb)

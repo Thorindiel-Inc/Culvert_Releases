@@ -40,7 +40,7 @@ Option Explicit
 '      area - SAP2000's simple area spring acts normal to the face only
 '    - MIDAS load cases with "_" dropped (EHS2_L -> EHS2L) and all eight
 '      MIDAS combinations
-'  Ec is INPUT!B19, falling back to 33 GPa as in the culvert SAP builder.
+'  Ec is INPUT!B19, falling back to 32 GPa as in the culvert SAP builder.
 ' ============================================================================
 
 
@@ -49,10 +49,10 @@ Option Explicit
 ' ---------------------------------------------------------------------------
 
 ' Stamped into the report title and the file. Bump with every change.
-Private Const SCRIPT_VERSION As String = "2026-09-29a"
+Private Const SCRIPT_VERSION As String = "2026-10-05a"
 
 ' One line, no "_" continuation, no "|" - read by the updater's manifest.
-Private Const SCRIPT_CHANGELOG As String = "Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box"
+Private Const SCRIPT_CHANGELOG As String = "Fallback Ec (used only when the Ec cell is blank or invalid) is now 32 GPa, TS500 C30"
 
 ' Identifies this module to the updater whatever it was named in Excel.
 Private Const SCRIPT_ID As String = "sap2000-wingwall-model-build"
@@ -87,7 +87,7 @@ Private Const MATERIAL_FC As Double = 30000#
 Private Const MATERIAL_POISN As Double = 0.2
 Private Const MATERIAL_THERMAL As Double = 0.00001
 Private Const MATERIAL_DEN As Double = 25
-Private Const MATERIAL_ELAST_DEFAULT As Double = 33000000#  ' fallback if B19 is blank/invalid
+Private Const MATERIAL_ELAST_DEFAULT As Double = 32000000#  ' fallback if B19 is blank/invalid (32 GPa, TS500 C30)
 Private Const CELL_MATERIAL_ELAST As String = "B19"
 Private Const GRAVITY_ACCEL As Double = 9.80665
 Private MATERIAL_ELAST As Double
