@@ -59,10 +59,10 @@ Option Explicit
 ' ---------------------------------------------------------------------------
 
 ' Stamped into the report title. Bump with every change to this file.
-Private Const SCRIPT_VERSION As String = "2026-10-05b"
+Private Const SCRIPT_VERSION As String = "2026-10-05d"
 
 ' One line, no "_" continuation, no "|" - read by the updater's manifest.
-Private Const SCRIPT_CHANGELOG As String = "EN 1990 factors: EHS1 1.35 (was 1.50) in ULS-1/2/15/16; minimum-vertical ULS-15..20 DL/EV 1.00 (was 0.90); fallback Ec 32 GPa"
+Private Const SCRIPT_CHANGELOG As String = "Run record: shear map carries mu_kNm (moment at the governing shear row); seismic gate Z/H <= 0.5"
 
 ' Identifies this module to the updater whatever it was named in Excel.
 Private Const SCRIPT_ID As String = "sap2000-culvert-model-build"
@@ -186,7 +186,7 @@ Private Const PROJINFO_COMPANY As String = "DEHA"
 
 ' ---------------------------------------------------------------------------
 '  SEISMIC GATE - identical to the MIDAS builder (see its header):
-'    -1 auto (1_GIRIS!P81, then O81 < Q81, then the INPUT Z/H ratio)
+'    -1 auto (1_GIRIS!P81, then O81 <= Q81, then the INPUT Z/H ratio)
 '     0 force OFF, 1 force ON.
 '  Off drops the EQ and ATA cases, the EQ wall loads, the ATA inertia, EQ-1
 '  and ENV_EQ. Auto-detect that finds nothing usable stops the export.
@@ -508,9 +508,9 @@ Private Function DetectSeismicGate() As Boolean
     Set wsGiris = ThisWorkbook.Worksheets("1_GIRIS")
     If Not wsGiris Is Nothing Then
         pVal = Trim$(CStr(wsGiris.Range("P81").Value))
-        If pVal = "<" Then
+        If pVal = "<" Or pVal = ChrW(8804) Then
             DetectSeismicGate = True
-            SEISMIC_GATE_SOURCE = "1_GIRIS!P81 = ""<"""
+            SEISMIC_GATE_SOURCE = "1_GIRIS!P81 = """ & pVal & """"
             Exit Function
         ElseIf pVal = ">" Then
             DetectSeismicGate = False
@@ -520,9 +520,9 @@ Private Function DetectSeismicGate() As Boolean
         If IsNumeric(wsGiris.Range("O81").Value) And IsNumeric(wsGiris.Range("Q81").Value) Then
             oVal = CDbl(wsGiris.Range("O81").Value)
             qVal = CDbl(wsGiris.Range("Q81").Value)
-            DetectSeismicGate = (oVal < qVal)
+            DetectSeismicGate = (oVal <= qVal)
             SEISMIC_GATE_SOURCE = "1_GIRIS!O81 = " & Format$(oVal, "0.000") & _
-                                  IIf(oVal < qVal, " < ", " >= ") & Format$(qVal, "0.000")
+                                  IIf(oVal <= qVal, " <= ", " > ") & Format$(qVal, "0.000")
             Exit Function
         End If
     End If
@@ -540,9 +540,9 @@ Private Function DetectSeismicGate() As Boolean
             tBot = CDbl(wsInput.Range("B14").Value)
             If (hWall + tTop + tBot) > 0 Then
                 ratio = hCover / (hWall + tTop + tBot)
-                DetectSeismicGate = (ratio < 0.5)
+                DetectSeismicGate = (ratio <= 0.5)
                 SEISMIC_GATE_SOURCE = "Z/H = INPUT!B21/(B23+B12+B14) = " & Format$(ratio, "0.000") & _
-                                      IIf(ratio < 0.5, " < ", " >= ") & "0.500"
+                                      IIf(ratio <= 0.5, " <= ", " > ") & "0.500"
                 Exit Function
             End If
         End If
@@ -3063,14 +3063,14 @@ Private Function RecGates() As String
     If SEISMIC_GATE_OVERRIDE = -1 Then
         pv = RecCell("1_GIRIS", "P81")
         If VarType(pv) = vbString Then pv = Trim$(pv) Else pv = ""
-        If pv = "<" Or pv = ">" Then
+        If pv = "<" Or pv = ChrW(8804) Or pv = ">" Then
             src = "1_GIRIS!P81 = """ & pv & """"
         ElseIf RecIsNum(ov) And RecIsNum(qv) Then
-            src = "1_GIRIS!O81 = " & RecFixed3(CDbl(ov)) & IIf(CDbl(ov) < CDbl(qv), " < ", " >= ") & _
+            src = "1_GIRIS!O81 = " & RecFixed3(CDbl(ov)) & IIf(CDbl(ov) <= CDbl(qv), " <= ", " > ") & _
                   RecFixed3(CDbl(qv))
         ElseIf Not IsEmpty(ratio) Then
             src = "Z/H = INPUT!B21/(B23+B12+B14) = " & RecFixed3(CDbl(ratio)) & _
-                  IIf(ratio < 0.5, " < ", " >= ") & "0.500"
+                  IIf(ratio <= 0.5, " <= ", " > ") & "0.500"
         End If
     End If
 
@@ -3206,8 +3206,8 @@ Private Function RecSections(ByRef notes As String) As String
             eV = RecSummaryElem(sm(r, 14), CLng(p(5))): pV = RecSummaryPart(sm(r, 16), p(6))
         End If
 
-        mStr = RecGoverning(rElem, rComb, rPos, rMy, rAx, n, eM, pM, "STR", p(4), "value_kNm")
-        mSer = RecGoverning(rElem, rComb, rPos, rMy, rAx, n, eS, pS, "SER", p(4), "value_kNm")
+        mStr = RecGoverning(rElem, rComb, rPos, rMy, rAx, rMy, n, eM, pM, "STR", p(4), "value_kNm")
+        mSer = RecGoverning(rElem, rComb, rPos, rMy, rAx, rMy, n, eS, pS, "SER", p(4), "value_kNm")
 
         sh = ""
         If calcDone Then
@@ -3251,7 +3251,7 @@ Private Function RecSections(ByRef notes As String) As String
         Call RecAdd(vv, "m_str", mStr)
         Call RecAdd(vv, "m_ser", mSer)
         If Len(p(5)) > 0 Then
-            Call RecAdd(vv, "v", RecGoverning(rElem, rComb, rPos, rVz, rAx, n, eV, pV, "STR", "abs", "value_kN"))
+            Call RecAdd(vv, "v", RecGoverning(rElem, rComb, rPos, rVz, rAx, rMy, n, eV, pV, "STR", "abs", "value_kN"))
         End If
         Call RecAdd(vv, "sheet", RecTMap(sh))
         Call RecAdd(f, sec, RecTMap(vv))
@@ -3264,9 +3264,10 @@ End Function
 
 ' The governing row of one section position: limitState "STR" (ULS-* and
 ' EQ-1) or "SER" (SLS-*); mode "min" / "max" (signed) or "abs". A typed
-' map, or null when no row matches.
+' map, or null when no row matches. The shear map also carries mu_kNm = the
+' moment (MIDAS_RESULTS column I, Moment-y) of the same row.
 Private Function RecGoverning(ByRef rElem() As Long, ByRef rComb() As String, ByRef rPos() As String, _
-                              ByRef rVal() As Double, ByRef rAx() As Double, ByVal n As Long, _
+                              ByRef rVal() As Double, ByRef rAx() As Double, ByRef rMom() As Double, ByVal n As Long, _
                               ByVal elemNo As Long, ByVal pos As String, ByVal limitState As String, _
                               ByVal mode As String, ByVal valueKey As String) As String
 
@@ -3306,6 +3307,7 @@ Private Function RecGoverning(ByRef rElem() As Long, ByRef rComb() As String, By
     Call RecAdd(f, "element", RecTInt(rElem(best)))
     Call RecAdd(f, "part", RecTStr(rPos(best)))
     Call RecAdd(f, "nu_kN", RecTDouble(rAx(best)))
+    If valueKey = "value_kN" Then Call RecAdd(f, "mu_kNm", RecTDouble(rMom(best)))
     RecGoverning = RecTMap(f)
 
 End Function

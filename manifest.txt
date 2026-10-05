@@ -4,9 +4,9 @@
 culvert-beam-diagram-capture|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box
 culvert-displacement-contour-capture|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box
 culvert-load-diagram-capture|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box
-culvert-model-build|2026-10-05b|EN 1990 factors: EHS1 1.35 (was 1.50) in ULS-1/2/15/16; minimum-vertical ULS-15..20 DL/EV 1.00 (was 0.90); fallback Ec 32 GPa
+culvert-model-build|2026-10-05d|Run record: shear map carries mu_kNm (moment at the governing shear row); seismic gate Z/H <= 0.5
 macro-updater|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box
-sap2000-culvert-model-build|2026-10-05b|EN 1990 factors: EHS1 1.35 (was 1.50) in ULS-1/2/15/16; minimum-vertical ULS-15..20 DL/EV 1.00 (was 0.90); fallback Ec 32 GPa
+sap2000-culvert-model-build|2026-10-05d|Run record: shear map carries mu_kNm (moment at the governing shear row); seismic gate Z/H <= 0.5
 sap2000-wingwall-model-build|2026-10-05a|Fallback Ec (used only when the Ec cell is blank or invalid) is now 32 GPa, TS500 C30
 wingwall-displacement-contour-capture|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box
 wingwall-load-diagram-capture|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box
