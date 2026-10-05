@@ -28,14 +28,14 @@ Option Explicit
 ' so a screenshot of a run does not otherwise say which build produced it -
 ' bump this whenever the file changes and check it matches before
 ' diagnosing anything from a report.
-Private Const SCRIPT_VERSION As String = "2026-10-05a"
+Private Const SCRIPT_VERSION As String = "2026-10-05b"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Fallback Ec (used only when the Ec cell is blank or invalid) is now 32 GPa, TS500 C30"
+Private Const SCRIPT_CHANGELOG As String = "EN 1990 factors: EHS1 1.35 (was 1.50) in ULS-1/2/15/16; minimum-vertical ULS-15..20 DL/EV 1.00 (was 0.90); fallback Ec 32 GPa"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -313,8 +313,8 @@ Private LIVE_LOAD_GATE_SOURCE As String
 
 ' ---------------------------------------------------------------------------
 '  MIN-VERTICAL GATE - INPUT!K17 = 1 adds six minimum-vertical / maximum-
-'  horizontal ultimate combinations, ULS-15..20: DL and EV at the AASHTO
-'  minimum 0.90, no vertical live load, the horizontal factors of
+'  horizontal ultimate combinations, ULS-15..20: DL and EV at the EN 1990
+'  gamma G,inf 1.00 (was AASHTO 0.90 until 2026-10-05), no vertical live load, the horizontal factors of
 '  ULS-1/2/5/6/9/10 (owner's request, 2026-09-29 - for the situations where
 '  a light roof and full earth pressure govern). They join ENV_STR, so
 '  ENV_ALL and MIDAS_RESULTS pick them up with no other change.
@@ -720,7 +720,7 @@ Sub BuildCulvertModel()
 
     If MIN_VERTICAL_ACTIVE Then
         report = report & "Min-vertical ON (" & MIN_VERTICAL_GATE_SOURCE & "): ULS-15..20, " & _
-                 "DL/EV x0.90, in ENV_STR." & vbCrLf
+                 "DL/EV x1.00, in ENV_STR." & vbCrLf
     Else
         report = report & "Min-vertical OFF (" & MIN_VERTICAL_GATE_SOURCE & ")." & vbCrLf
     End If
@@ -1840,7 +1840,7 @@ End Function
 '  not live-load cases):
 '    SLS-1..14   serviceability, factors 1.0 / 0.5
 '    ULS-1..14   ultimate, 1.35 permanent / 1.5 / 1.45 / 0.75
-'    ULS-15..20  minimum vertical (DL/EV 0.90) - only when
+'    ULS-15..20  minimum vertical (DL/EV 1.00) - only when
 '                MIN_VERTICAL_ACTIVE (INPUT!K17 = 1), 6 more in every count
 '    ACC-1      accidental (LLacc) - NOT seismic, dropped entirely when
 '                LIVE_LOAD_ACTIVE is False (LLacc is its only load)
@@ -1886,8 +1886,8 @@ Private Sub GenerateLoadCombinations()
     Call AddCombo("SLS-14", 0, "ST", "DL:1,EV2:1,EHA2_L:0.5,EHA2_R:0.5,LL:1", 1)
 
     ' --- Ultimate ---
-    Call AddCombo("ULS-1", 0, "ST", "DL:1.35,EV1:1.35,EHS1:1.5,LL1:1.45,LSS1_L:1.45", 1)
-    Call AddCombo("ULS-2", 0, "ST", "DL:1.35,EV1:1.35,EHS1:1.5", 1)
+    Call AddCombo("ULS-1", 0, "ST", "DL:1.35,EV1:1.35,EHS1:1.35,LL1:1.45,LSS1_L:1.45", 1)
+    Call AddCombo("ULS-2", 0, "ST", "DL:1.35,EV1:1.35,EHS1:1.35", 1)
     Call AddCombo("ULS-3", 0, "ST", "DL:1.35,EV1:1.35,EHS1:0.75,LL1:1.45,LSS1_L:1.45", 1)
     Call AddCombo("ULS-4", 0, "ST", "DL:1.35,EV1:1.35,EHS1:0.75", 1)
     Call AddCombo("ULS-5", 0, "ST", "DL:1.35,EV2:1.35,EHS2_L:1.35,EHS2_R:1.35", 1)
@@ -1904,19 +1904,19 @@ Private Sub GenerateLoadCombinations()
     Call AddCombo("ULS-14", 0, "ST", "DL:1.35,EV2:1.35,EHA2_L:0.75,EHA2_R:0.75,LL:1.45", 1)
 
     ' --- Minimum vertical / maximum horizontal (INPUT!K17 = 1 only) ---
-    ' ULS-1/2/5/6/9/10 with DL and EV at the AASHTO minimum 0.90 and no
+    ' ULS-1/2/5/6/9/10 with DL and EV at EN 1990 gamma G,inf = 1.00 and no
     ' vertical live load (LL1/LL); the horizontal terms keep their factors.
     ' Named ULS-* so ENV_STR and MIDAS_RESULTS table 1 take them in. With
     ' live load off, ULS-19/20 lose LSS2_L/LSA2_L and repeat ULS-17/18, as
     ' SLS-7 repeats SLS-5 (accepted). Gate off: nothing here, every later
     ' key unchanged.
     If MIN_VERTICAL_ACTIVE Then
-        Call AddCombo("ULS-15", 0, "ST", "DL:0.9,EV1:0.9,EHS1:1.5,LSS1_L:1.45", 1)
-        Call AddCombo("ULS-16", 0, "ST", "DL:0.9,EV1:0.9,EHS1:1.5", 1)
-        Call AddCombo("ULS-17", 0, "ST", "DL:0.9,EV2:0.9,EHS2_L:1.35,EHS2_R:1.35", 1)
-        Call AddCombo("ULS-18", 0, "ST", "DL:0.9,EV2:0.9,EHA2_L:1.35,EHA2_R:1.35", 1)
-        Call AddCombo("ULS-19", 0, "ST", "DL:0.9,EV2:0.9,EHS2_L:1.35,EHS2_R:1.35,LSS2_L:1.45", 1)
-        Call AddCombo("ULS-20", 0, "ST", "DL:0.9,EV2:0.9,EHA2_L:1.35,EHA2_R:1.35,LSA2_L:1.45", 1)
+        Call AddCombo("ULS-15", 0, "ST", "DL:1,EV1:1,EHS1:1.35,LSS1_L:1.45", 1)
+        Call AddCombo("ULS-16", 0, "ST", "DL:1,EV1:1,EHS1:1.35", 1)
+        Call AddCombo("ULS-17", 0, "ST", "DL:1,EV2:1,EHS2_L:1.35,EHS2_R:1.35", 1)
+        Call AddCombo("ULS-18", 0, "ST", "DL:1,EV2:1,EHA2_L:1.35,EHA2_R:1.35", 1)
+        Call AddCombo("ULS-19", 0, "ST", "DL:1,EV2:1,EHS2_L:1.35,EHS2_R:1.35,LSS2_L:1.45", 1)
+        Call AddCombo("ULS-20", 0, "ST", "DL:1,EV2:1,EHA2_L:1.35,EHA2_R:1.35,LSA2_L:1.45", 1)
     End If
 
     ' --- Accidental and seismic ---
