@@ -28,14 +28,14 @@ Option Explicit
 ' so a screenshot of a run does not otherwise say which build produced it -
 ' bump this whenever the file changes and check it matches before
 ' diagnosing anything from a report.
-Private Const SCRIPT_VERSION As String = "2026-10-05d"
+Private Const SCRIPT_VERSION As String = "2026-10-08a"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Run record: shear map carries mu_kNm (moment at the governing shear row); seismic gate Z/H <= 0.5"
+Private Const SCRIPT_CHANGELOG As String = "EQ-1 + 0.3 LSA2_L; new EQ-2 (EQ-1 + 0.3 LL) in ENV_ALL/ENV_EQ, results table 1 and the run record"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -248,7 +248,7 @@ Private Const SECTION_COLOR_OPACITY As Double = 0.5
 '  SEISMIC GATE - whether this culvert is designed for earthquake at all.
 '
 '  On the sheet this is evaluated as:
-'    IF('1_GIRIS'!O81 <= '1_GIRIS'!Q81, <with EQ-1>, <without>)
+'    IF('1_GIRIS'!O81 <= '1_GIRIS'!Q81, <with EQ-1/EQ-2>, <without>)
 '  i.e. seismic counts only when the burial ratio Z/H is AT MOST 0.5 (sheet "<=" since 2026-10-05):
 '    O81 = Z/H = INPUT!B21 / (INPUT!B23 + INPUT!B12 + INPUT!B14)
 '    Q81 = 0.5 (fixed threshold)
@@ -266,14 +266,14 @@ Private Const SECTION_COLOR_OPACITY As Double = 0.5
 '    db/STLD    no EQ, no ATA load case
 '    db/BMLD    no EQ beam loads          (AddEqLoads)
 '    db/BODF    no ATA self-weight        (PostSelfWeight)
-'    db/LCOM    no EQ-1, and ENV_ALL envelopes only ENV_SER + ENV_STR
+'    db/LCOM    no EQ-1/EQ-2, and ENV_ALL envelopes only ENV_SER + ENV_STR
 '  When TRUE, the complete seismic chain is active:
 '    db/STLD    EQ and ATA load cases created
 '    db/BMLD    EQ lateral earth pressure beam loads applied
 '    db/BODF    ATA self-weight inertia acceleration applied - only when
 '               kh (B15) is not 0; kh = 0 keeps the ATA case, empty
-'    db/LCOM    EQ-1 combo created and added to ENV_ALL envelope
-'    post/TABLE PostBeamForceResults retrieves EQ-1(CB) into Table 1
+'    db/LCOM    EQ-1 and EQ-2 combos created, added to ENV_ALL envelope
+'    post/TABLE PostBeamForceResults retrieves EQ-1(CB)/EQ-2(CB) into Table 1
 '               and reflects it in Table 2 envelopes
 ' ---------------------------------------------------------------------------
 Private Const SEISMIC_GATE_OVERRIDE As Long = -1
@@ -688,7 +688,7 @@ Sub BuildCulvertModel()
     End If
 
     If SEISMIC_ACTIVE Then
-        report = report & "Seismic ON (" & SEISMIC_GATE_SOURCE & "): EQ/ATA, EQ-1, ENV_EQ." & vbCrLf
+        report = report & "Seismic ON (" & SEISMIC_GATE_SOURCE & "): EQ/ATA, EQ-1, EQ-2 (live load on), ENV_EQ." & vbCrLf
     Else
         report = report & "Seismic OFF (" & SEISMIC_GATE_SOURCE & "): no EQ/ATA." & vbCrLf
     End If
@@ -1831,8 +1831,9 @@ End Function
 '  LOAD COMBINATIONS - fixed set, transcribed from the sheet's old
 '  *LOADCOMB block. Nothing is read from the worksheet any more.
 '
-'  35 combinations (33 when SEISMIC_ACTIVE is False - no EQ-1, no ENV_EQ;
-'  34 when LIVE_LOAD_ACTIVE is False - no ACC-1; 32 when both are False).
+'  36 combinations (33 when SEISMIC_ACTIVE is False - no EQ-1/EQ-2, no ENV_EQ;
+'  34 when LIVE_LOAD_ACTIVE is False - no ACC-1, no EQ-2; 32 when both are
+'  False). With the MIN_VERTICAL gate on, 6 more in every count.
 '  Every SLS-*/ULS-* combination keeps its name and place either way -
 '  AddCombo strips out the terms of any "ST" pair whose case
 '  IsLiveLoadCase when the gate is off (e.g. SLS-7 becomes DL,EV2,
@@ -1844,14 +1845,17 @@ End Function
 '                MIN_VERTICAL_ACTIVE (INPUT!K17 = 1), 6 more in every count
 '    ACC-1      accidental (LLacc) - NOT seismic, dropped entirely when
 '                LIVE_LOAD_ACTIVE is False (LLacc is its only load)
-'    EQ-1        seismic (EQ lateral pressure only, no ATA inertia) -
-'                only when SEISMIC_ACTIVE
+'    EQ-1        seismic (EQ lateral pressure only, no ATA inertia) + 0.3
+'                LSA2_L - only when SEISMIC_ACTIVE
+'    EQ-2        EQ-1 + 0.3 LL (EN 1998-2 psi2-type traffic share, owner's
+'                table, 2026-10-08) - only when SEISMIC_ACTIVE and
+'                LIVE_LOAD_ACTIVE; right after EQ-1, ENV_* keys shift by 1
 '    ENV_SER     envelope of all SLS
 '    ENV_STR     envelope of all ULS
-'    ENV_ALL     envelope of ENV_SER + ENV_STR, plus EQ-1 when
-'                SEISMIC_ACTIVE (see the gate at the top of the module)
+'    ENV_ALL     envelope of ENV_SER + ENV_STR, plus EQ-1 and EQ-2
+'                when SEISMIC_ACTIVE (see the gate at the top of the module)
 '    ENV_DEAD    envelope of the four no-live-load SLS cases
-'    ENV_EQ      envelope of EQ-1 - only when SEISMIC_ACTIVE
+'    ENV_EQ      envelope of EQ-1 (+ EQ-2) - only when SEISMIC_ACTIVE
 '  The SLS/ULS/ACC/EQ combinations reference static load cases ("ST");
 '  every ENV_* one references other combinations ("CB"), which is why
 '  each combination's factor list is homogeneous and AddCombo can take a
@@ -1926,17 +1930,25 @@ Private Sub GenerateLoadCombinations()
     ' the same as SLS-6, and is dropped entirely instead (owner's
     ' decision, 2026-09-24). EQ-1 goes only when the seismic gate is on.
     '
-    ' EQ-1 deliberately does NOT reference ATA (by request, 2026-09-23) -
+    ' EQ-1/EQ-2 deliberately do NOT reference ATA (by request, 2026-09-23) -
     ' only the EQ lateral earth pressure case. ATA is still built as a
     ' static load case (db/STLD) and still carries its self-weight
     ' inertia record (db/BODF) whenever SEISMIC_ACTIVE, per the
     ' SEISMIC GATE block above - it is simply not pulled into any
-    ' combination any more, EQ-1 or otherwise.
+    ' combination any more, EQ-1/EQ-2 or otherwise.
     If LIVE_LOAD_ACTIVE Then
         Call AddCombo("ACC-1", 0, "ST", "DL:1,EV2:1,EHA2_L:1,EHA2_R:1,LLacc:1", 1)
     End If
+    ' EQ-1 carries 0.3 LSA2_L (owner, 2026-10-08); EQ-2 = EQ-1 + 0.3 LL (the
+    ' EN 1998-2 psi2-type traffic share, owner's table), right after EQ-1 so
+    ' the ENV_* keys move up by one. EQ-2 needs the seismic AND live-load
+    ' gates: with live load off it would equal EQ-1 and is dropped entirely,
+    ' like ACC-1 (EQ-1 then loses LSA2_L through AddCombo's own stripping).
     If SEISMIC_ACTIVE Then
-        Call AddCombo("EQ-1", 0, "ST", "DL:1,EV2:1,EHA2_L:1,EHA2_R:1,EQ:1", 1)
+        Call AddCombo("EQ-1", 0, "ST", "DL:1,EV2:1,EHA2_L:1,EHA2_R:1,LSA2_L:0.3,EQ:1", 1)
+        If LIVE_LOAD_ACTIVE Then
+            Call AddCombo("EQ-2", 0, "ST", "DL:1,EV2:1,EHA2_L:1,EHA2_R:1,LL:0.3,LSA2_L:0.3,EQ:1", 1)
+        End If
     End If
 
     ' --- Envelopes ---
@@ -1951,7 +1963,11 @@ Private Sub GenerateLoadCombinations()
     Call AddCombo("ENV_STR", 1, "CB", strSpec, 2)
 
     If SEISMIC_ACTIVE Then
-        Call AddCombo("ENV_ALL", 1, "CB", "EQ-1:1,ENV_SER:1,ENV_STR:1", 3)
+        If LIVE_LOAD_ACTIVE Then
+            Call AddCombo("ENV_ALL", 1, "CB", "EQ-1:1,EQ-2:1,ENV_SER:1,ENV_STR:1", 3)
+        Else
+            Call AddCombo("ENV_ALL", 1, "CB", "EQ-1:1,ENV_SER:1,ENV_STR:1", 3)
+        End If
     Else
         Call AddCombo("ENV_ALL", 1, "CB", "ENV_SER:1,ENV_STR:1", 3)
     End If
@@ -1960,9 +1976,14 @@ Private Sub GenerateLoadCombinations()
 
     ' ENV_EQ, the seismic envelope the displacement capture reads. Last, so
     ' every other combination keeps the key it always had; seismic only,
-    ' like EQ-1 itself (the capture reports it SKIPPED otherwise).
+    ' like EQ-1 itself (the capture reports it SKIPPED otherwise). With live
+    ' load on it envelopes EQ-1 and EQ-2.
     If SEISMIC_ACTIVE Then
-        Call AddCombo("ENV_EQ", 1, "CB", "EQ-1:1", 2)
+        If LIVE_LOAD_ACTIVE Then
+            Call AddCombo("ENV_EQ", 1, "CB", "EQ-1:1,EQ-2:1", 2)
+        Else
+            Call AddCombo("ENV_EQ", 1, "CB", "EQ-1:1", 2)
+        End If
     End If
 
 End Sub
@@ -1973,7 +1994,7 @@ End Sub
 '
 ' "tier" is the dependency level, used by PostLoadCombinations to decide
 ' what has to be written before what:
-'   1  references only static load cases           (SLS/ULS/ACC/EQ-1)
+'   1  references only static load cases           (SLS/ULS/ACC/EQ-1/EQ-2)
 '   2  references tier-1 combinations              (ENV_SER/STR/DEAD)
 '   3  references tier-2 combinations              (ENV_ALL)
 Private Sub AddCombo(ByVal nm As String, ByVal iType As Long, _
@@ -2901,7 +2922,7 @@ End Function
 '  Retrieves beam force result tables from MIDAS Civil NX after analysis
 '  and populates both tables on the "MIDAS_RESULTS" sheet:
 '    Table 1 (Cols B:J, starting row 3):
-'      All 28 SLS & ULS combinations (plus EQ-1 if active; ACC-1 is
+'      All 28 SLS & ULS combinations (plus EQ-1/EQ-2 if active; ACC-1 is
 '      excluded from this pull by request even though it is still built
 '      as a combination - see GenerateLoadCombinations)
 '    Table 2 (Cols S:AA, starting row 36):
@@ -2953,16 +2974,16 @@ Private Function PostBeamForceResults() As String
     End If
 
     ' --- Table 1: Primary load combinations ---
-    ' Every SLS-*, ULS-* and EQ-1 combination GenerateLoadCombinations
+    ' Every SLS-*, ULS-* and EQ-1/EQ-2 combination GenerateLoadCombinations
     ' actually produced, in its order - taken from LOADCOMB_LIST rather than
     ' a hardcoded "1 To 14", so a combination added there cannot silently
-    ' miss this table. ACC-1 stays out by request; EQ-1 is only in the list
+    ' miss this table. ACC-1 stays out by request; EQ-1/EQ-2 are only in the list
     ' when the seismic gate is on.
     t1Combos = ""
     combRows = Split(LOADCOMB_LIST, ";")
     For i = LBound(combRows) To UBound(combRows)
         combName = Split(combRows(i), "|")(0)
-        If Left$(combName, 4) = "SLS-" Or Left$(combName, 4) = "ULS-" Or combName = "EQ-1" Then
+        If Left$(combName, 4) = "SLS-" Or Left$(combName, 4) = "ULS-" Or combName = "EQ-1" Or combName = "EQ-2" Then
             t1Combos = t1Combos & IIf(Len(t1Combos) > 0, ",", "") & """" & combName & "(CB)"""
         End If
     Next i
@@ -4079,9 +4100,9 @@ Private Function RecSectionList() As String
 End Function
 
 ' Per face, over MIDAS_RESULTS table 1 (B:J from row 3): the largest
-' moment of the face's tension sign over ULS-* + EQ-1 (m_str) / SLS-*
+' moment of the face's tension sign over ULS-* + EQ-1/EQ-2 (m_str) / SLS-*
 ' (m_ser) at the summary block's position, Nu from the same row; V = the
-' largest |Shear-z| over ULS-* + EQ-1. Strict < / > - the first row wins a
+' largest |Shear-z| over ULS-* + EQ-1/EQ-2. Strict < / > - the first row wins a
 ' tie. "" (an empty map) when table 1 does not hold exactly this run's
 ' combinations. Returns the map's fields.
 Private Function RecSections(ByRef notes As String) As String
@@ -4141,7 +4162,7 @@ Private Function RecSections(ByRef notes As String) As String
         End If
     Next i
 
-    ' Table 1 must hold exactly this run's SLS-/ULS-/EQ-1 combinations.
+    ' Table 1 must hold exactly this run's SLS-/ULS-/EQ-1/EQ-2 combinations.
     Set have = CreateObject("Scripting.Dictionary")
     Set want = CreateObject("Scripting.Dictionary")
     For i = 1 To n
@@ -4154,6 +4175,7 @@ Private Function RecSections(ByRef notes As String) As String
         want("ULS-" & i) = True
     Next i
     If SEISMIC_ACTIVE Then want("EQ-1") = True
+    If SEISMIC_ACTIVE And LIVE_LOAD_ACTIVE Then want("EQ-2") = True
     comb = ""
     If have.Count <> want.Count Then comb = "x"
     For Each k In want.Keys
@@ -4240,7 +4262,7 @@ Private Function RecSections(ByRef notes As String) As String
 End Function
 
 ' The governing row of one section position: limitState "STR" (ULS-* and
-' EQ-1) or "SER" (SLS-*); mode "min" / "max" (signed) or "abs". A typed
+' EQ-1/EQ-2) or "SER" (SLS-*); mode "min" / "max" (signed) or "abs". A typed
 ' map, or null when no row matches. The shear map also carries mu_kNm = the
 ' moment (MIDAS_RESULTS column I, Moment-y) of the same row.
 Private Function RecGoverning(ByRef rElem() As Long, ByRef rComb() As String, ByRef rPos() As String, _
@@ -4256,7 +4278,7 @@ Private Function RecGoverning(ByRef rElem() As Long, ByRef rComb() As String, By
     For i = 1 To n
         If rElem(i) = elemNo And rPos(i) = pos Then
             If limitState = "STR" Then
-                keep = (Left$(rComb(i), 4) = "ULS-" Or rComb(i) = "EQ-1")
+                keep = (Left$(rComb(i), 4) = "ULS-" Or rComb(i) = "EQ-1" Or rComb(i) = "EQ-2")
             Else
                 keep = (Left$(rComb(i), 4) = "SLS-")
             End If

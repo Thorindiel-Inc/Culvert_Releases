@@ -37,7 +37,7 @@ Option Explicit
 '  Owner's decisions (2026-09-24), against the hand-built reference model
 '  old/SAP2000/3.00x3.00_Hd_3.0m.$2k:
 '    - full MIDAS load set (20 cases less the seismic pair when the gate is
-'      off) and all 33/35 combinations, not the reference's subset
+'      off) and all 33/36 combinations, not the reference's subset
 '    - rigid-zone and haunch members get their own sections (MIDAS_INPUT
 '      rows 10-16) instead of the plain slab/wall/foundation one
 '    - XZ plane frame (UX UZ RY active), so springs at z = 0 alone make it
@@ -59,10 +59,10 @@ Option Explicit
 ' ---------------------------------------------------------------------------
 
 ' Stamped into the report title. Bump with every change to this file.
-Private Const SCRIPT_VERSION As String = "2026-10-05d"
+Private Const SCRIPT_VERSION As String = "2026-10-08a"
 
 ' One line, no "_" continuation, no "|" - read by the updater's manifest.
-Private Const SCRIPT_CHANGELOG As String = "Run record: shear map carries mu_kNm (moment at the governing shear row); seismic gate Z/H <= 0.5"
+Private Const SCRIPT_CHANGELOG As String = "EQ-1 + 0.3 LSA2_L; new EQ-2 (EQ-1 + 0.3 LL) in ENV_ALL/ENV_EQ, results table 1 and the run record"
 
 ' Identifies this module to the updater whatever it was named in Excel.
 Private Const SCRIPT_ID As String = "sap2000-culvert-model-build"
@@ -132,7 +132,7 @@ Private Const SECTION_WIDTH As Double = 1#
 ' RESULTS - SAP2000's forces go into MIDAS_RESULTS's two data tables,
 ' replacing what is there, row for row as the MIDAS builder writes them
 ' (headers, summary block and helper formulas stay as they are):
-'   table 1  B:J from row 3    every SLS-*, ULS-* and EQ-1 combination
+'   table 1  B:J from row 3    every SLS-*, ULS-*, EQ-1 and EQ-2 combination
 '   table 2  S:AA from row 36  ENV_SER/ENV_ALL max, then ENV_SER/ENV_ALL min
 ' Combination outer, element ascending, then I[node], 2/4, J[node]; values
 ' to 2 dp (MIDAS STYLES PLACE 2). MIDAS columns from SAP (measured against a
@@ -188,8 +188,8 @@ Private Const PROJINFO_COMPANY As String = "DEHA"
 '  SEISMIC GATE - identical to the MIDAS builder (see its header):
 '    -1 auto (1_GIRIS!P81, then O81 <= Q81, then the INPUT Z/H ratio)
 '     0 force OFF, 1 force ON.
-'  Off drops the EQ and ATA cases, the EQ wall loads, the ATA inertia, EQ-1
-'  and ENV_EQ. Auto-detect that finds nothing usable stops the export.
+'  Off drops the EQ and ATA cases, the EQ wall loads, the ATA inertia, EQ-1,
+'  EQ-2 and ENV_EQ. Auto-detect that finds nothing usable stops the export.
 ' ---------------------------------------------------------------------------
 Private Const SEISMIC_GATE_OVERRIDE As Long = -1
 Private SEISMIC_ACTIVE As Boolean
@@ -1236,17 +1236,25 @@ Private Sub GenerateLoadCombinations()
     ' the same as SLS-6, and is dropped entirely instead (owner's
     ' decision, 2026-09-24). EQ-1 goes only when the seismic gate is on.
     '
-    ' EQ-1 deliberately does NOT reference ATA (by request, 2026-09-23) -
+    ' EQ-1/EQ-2 deliberately do NOT reference ATA (by request, 2026-09-23) -
     ' only the EQ lateral earth pressure case. ATA is still built as a
     ' static load case (db/STLD) and still carries its self-weight
     ' inertia record (db/BODF) whenever SEISMIC_ACTIVE, per the
     ' SEISMIC GATE block above - it is simply not pulled into any
-    ' combination any more, EQ-1 or otherwise.
+    ' combination any more, EQ-1/EQ-2 or otherwise.
     If LIVE_LOAD_ACTIVE Then
         Call AddCombo("ACC-1", 0, "ST", "DL:1,EV2:1,EHA2_L:1,EHA2_R:1,LLacc:1", 1)
     End If
+    ' EQ-1 carries 0.3 LSA2_L (owner, 2026-10-08); EQ-2 = EQ-1 + 0.3 LL (the
+    ' EN 1998-2 psi2-type traffic share, owner's table), right after EQ-1 so
+    ' the ENV_* keys move up by one. EQ-2 needs the seismic AND live-load
+    ' gates: with live load off it would equal EQ-1 and is dropped entirely,
+    ' like ACC-1 (EQ-1 then loses LSA2_L through AddCombo's own stripping).
     If SEISMIC_ACTIVE Then
-        Call AddCombo("EQ-1", 0, "ST", "DL:1,EV2:1,EHA2_L:1,EHA2_R:1,EQ:1", 1)
+        Call AddCombo("EQ-1", 0, "ST", "DL:1,EV2:1,EHA2_L:1,EHA2_R:1,LSA2_L:0.3,EQ:1", 1)
+        If LIVE_LOAD_ACTIVE Then
+            Call AddCombo("EQ-2", 0, "ST", "DL:1,EV2:1,EHA2_L:1,EHA2_R:1,LL:0.3,LSA2_L:0.3,EQ:1", 1)
+        End If
     End If
 
     ' --- Envelopes ---
@@ -1261,7 +1269,11 @@ Private Sub GenerateLoadCombinations()
     Call AddCombo("ENV_STR", 1, "CB", strSpec, 2)
 
     If SEISMIC_ACTIVE Then
-        Call AddCombo("ENV_ALL", 1, "CB", "EQ-1:1,ENV_SER:1,ENV_STR:1", 3)
+        If LIVE_LOAD_ACTIVE Then
+            Call AddCombo("ENV_ALL", 1, "CB", "EQ-1:1,EQ-2:1,ENV_SER:1,ENV_STR:1", 3)
+        Else
+            Call AddCombo("ENV_ALL", 1, "CB", "EQ-1:1,ENV_SER:1,ENV_STR:1", 3)
+        End If
     Else
         Call AddCombo("ENV_ALL", 1, "CB", "ENV_SER:1,ENV_STR:1", 3)
     End If
@@ -1270,9 +1282,14 @@ Private Sub GenerateLoadCombinations()
 
     ' ENV_EQ, the seismic envelope the displacement capture reads. Last, so
     ' every other combination keeps the key it always had; seismic only,
-    ' like EQ-1 itself (the capture reports it SKIPPED otherwise).
+    ' like EQ-1 itself (the capture reports it SKIPPED otherwise). With live
+    ' load on it envelopes EQ-1 and EQ-2.
     If SEISMIC_ACTIVE Then
-        Call AddCombo("ENV_EQ", 1, "CB", "EQ-1:1", 2)
+        If LIVE_LOAD_ACTIVE Then
+            Call AddCombo("ENV_EQ", 1, "CB", "EQ-1:1,EQ-2:1", 2)
+        Else
+            Call AddCombo("ENV_EQ", 1, "CB", "EQ-1:1", 2)
+        End If
     End If
 
 End Sub
@@ -1644,7 +1661,7 @@ Private Function ForcePullScript(ByVal forcesPath As String) As String
 
 End Function
 
-' The combinations of results table 1 (every SLS-*, ULS-* and EQ-1 the
+' The combinations of results table 1 (every SLS-*, ULS-*, EQ-1 and EQ-2 the
 ' model has, in LOADCOMB_LIST order - the MIDAS builder's rule, ACC-1 left
 ' out) or table 2 (the two envelopes).
 Private Function ResultCombos(ByVal tableNo As Long) As Collection
@@ -1663,7 +1680,7 @@ Private Function ResultCombos(ByVal tableNo As Long) As Collection
     rows = Split(LOADCOMB_LIST, ";")
     For i = 0 To UBound(rows)
         nm = Split(rows(i), "|")(0)
-        If Left$(nm, 4) = "SLS-" Or Left$(nm, 4) = "ULS-" Or nm = "EQ-1" Then ResultCombos.Add nm
+        If Left$(nm, 4) = "SLS-" Or Left$(nm, 4) = "ULS-" Or nm = "EQ-1" Or nm = "EQ-2" Then ResultCombos.Add nm
     Next i
 
 End Function
@@ -3102,9 +3119,9 @@ Private Function RecSectionList() As String
 End Function
 
 ' Per face, over MIDAS_RESULTS table 1 (B:J from row 3): the largest
-' moment of the face's tension sign over ULS-* + EQ-1 (m_str) / SLS-*
+' moment of the face's tension sign over ULS-* + EQ-1/EQ-2 (m_str) / SLS-*
 ' (m_ser) at the summary block's position, Nu from the same row; V = the
-' largest |Shear-z| over ULS-* + EQ-1. Strict < / > - the first row wins a
+' largest |Shear-z| over ULS-* + EQ-1/EQ-2. Strict < / > - the first row wins a
 ' tie. "" (an empty map) when table 1 does not hold exactly this run's
 ' combinations. Returns the map's fields.
 Private Function RecSections(ByRef notes As String) As String
@@ -3164,7 +3181,7 @@ Private Function RecSections(ByRef notes As String) As String
         End If
     Next i
 
-    ' Table 1 must hold exactly this run's SLS-/ULS-/EQ-1 combinations.
+    ' Table 1 must hold exactly this run's SLS-/ULS-/EQ-1/EQ-2 combinations.
     Set have = CreateObject("Scripting.Dictionary")
     Set want = CreateObject("Scripting.Dictionary")
     For i = 1 To n
@@ -3177,6 +3194,7 @@ Private Function RecSections(ByRef notes As String) As String
         want("ULS-" & i) = True
     Next i
     If SEISMIC_ACTIVE Then want("EQ-1") = True
+    If SEISMIC_ACTIVE And LIVE_LOAD_ACTIVE Then want("EQ-2") = True
     comb = ""
     If have.Count <> want.Count Then comb = "x"
     For Each k In want.Keys
@@ -3263,7 +3281,7 @@ Private Function RecSections(ByRef notes As String) As String
 End Function
 
 ' The governing row of one section position: limitState "STR" (ULS-* and
-' EQ-1) or "SER" (SLS-*); mode "min" / "max" (signed) or "abs". A typed
+' EQ-1/EQ-2) or "SER" (SLS-*); mode "min" / "max" (signed) or "abs". A typed
 ' map, or null when no row matches. The shear map also carries mu_kNm = the
 ' moment (MIDAS_RESULTS column I, Moment-y) of the same row.
 Private Function RecGoverning(ByRef rElem() As Long, ByRef rComb() As String, ByRef rPos() As String, _
@@ -3279,7 +3297,7 @@ Private Function RecGoverning(ByRef rElem() As Long, ByRef rComb() As String, By
     For i = 1 To n
         If rElem(i) = elemNo And rPos(i) = pos Then
             If limitState = "STR" Then
-                keep = (Left$(rComb(i), 4) = "ULS-" Or rComb(i) = "EQ-1")
+                keep = (Left$(rComb(i), 4) = "ULS-" Or rComb(i) = "EQ-1" Or rComb(i) = "EQ-2")
             Else
                 keep = (Left$(rComb(i), 4) = "SLS-")
             End If
