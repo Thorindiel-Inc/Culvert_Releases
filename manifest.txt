@@ -8,7 +8,7 @@ culvert-model-build|2026-10-08a|EQ-1 + 0.3 LSA2_L; new EQ-2 (EQ-1 + 0.3 LL) in E
 macro-updater|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box
 sap2000-culvert-model-build|2026-10-08a|EQ-1 + 0.3 LSA2_L; new EQ-2 (EQ-1 + 0.3 LL) in ENV_ALL/ENV_EQ, results table 1 and the run record
 sap2000-wingwall-model-build|2026-10-05a|Fallback Ec (used only when the Ec cell is blank or invalid) is now 32 GPa, TS500 C30
-wingwall-displacement-contour-capture|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box
+wingwall-displacement-contour-capture|2026-10-08a|Settlement pictures show the WHOLE foundation (INPUT!G12, rigid bands under the walls included) instead of the clear span only (G10)
 wingwall-load-diagram-capture|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box
 wingwall-model-build|2026-10-05a|Fallback Ec (used only when the Ec cell is blank or invalid) is now 32 GPa, TS500 C30
 wingwall-plate-forces-capture|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box

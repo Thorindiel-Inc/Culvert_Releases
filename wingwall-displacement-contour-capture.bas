@@ -27,14 +27,14 @@ Option Explicit
 ' hand, so the file in the repo and the code actually running can silently
 ' diverge - check this stamp matches the constant here before concluding
 ' anything from a run. Bump it whenever this file changes.
-Private Const SCRIPT_VERSION As String = "2026-09-29a"
+Private Const SCRIPT_VERSION As String = "2026-10-08a"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box"
+Private Const SCRIPT_CHANGELOG As String = "Settlement pictures show the WHOLE foundation (INPUT!G12, rigid bands under the walls included) instead of the clear span only (G10)"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -114,14 +114,19 @@ Private Const IMG_HEIGHT As Long = 750
 Private Const ZOOM_LEVEL As Long = 100
 
 ' Elements to activate before capture (only these are shown/plotted) -
-' the foundation elements, same source cell as ELEMENT_LIST_FOUND in
-' midas-wingwall-plate-forces-capture.bas, since displacement here is a
-' foundation (settlement) check, not a wall-displacement check. Read at
-' runtime from the "INPUT" sheet's G10 cell instead of hardcoded, since
-' the wingwall's element numbers differ per workbook - populated by
-' ReadElementListFromInput() at the start of
+' EVERY foundation plate, since displacement here is a foundation
+' (settlement) check, not a wall-displacement check. Read at runtime from
+' the "INPUT" sheet's G12 cell ("FOUND PRR", written by the wingwall
+' builder: rigid bands under the walls included). Until 2026-10-08 this
+' read G10 - the non-rigid plates only, i.e. the clear span between the
+' walls - so the pictures left out the foundation under both walls (owner,
+' 2026-10-08). The plate-forces capture keeps G10 on purpose (owner: the
+' result pictures stay without the rigid zones). A blank G12 (a workbook
+' built before the builder wrote it) falls back to G10 with a NOTE in the
+' report. Populated by ReadElementListFromInput() at the start of
 ' CaptureWingwallDisplacementContours().
 Private ELEMENT_LIST As String
+Private ELEMENT_LIST_NOTE As String
 
 ' Camera view angle (Argument.ANGLE.HORIZONTAL/VERTICAL, degrees) - same
 ' foundation ("tml") view as midas-wingwall-plate-forces-capture.bas,
@@ -231,7 +236,7 @@ Sub CaptureWingwallDisplacementContours()
 
     If Not ReadElementListFromInput(ELEMENT_LIST) Then
         Call RestoreUnitsAndReport(origForce, origDist, origHeat, origTemper)
-        MsgBox "Could not read the foundation element list from the ""INPUT"" sheet (G10).", vbCritical
+        MsgBox "Could not read the foundation element list from the ""INPUT"" sheet (G12 / G10).", vbCritical
         Exit Sub
     End If
 
@@ -271,6 +276,7 @@ Sub CaptureWingwallDisplacementContours()
     report = "Wingwall displacement contour capture  [" & SCRIPT_VERSION & "]" & vbCrLf & _
              RestoreUnitsAndReport(origForce, origDist, origHeat, origTemper) & vbCrLf
     If Len(unitWarn) > 0 Then report = report & unitWarn & vbCrLf
+    If Len(ELEMENT_LIST_NOTE) > 0 Then report = report & ELEMENT_LIST_NOTE & vbCrLf
     report = report & vbCrLf & BuildSummaryReport(okCount, warnCount, skipCount, failCount, _
                                                   okLog, warnLog, skipLog, failLog)
 
@@ -577,10 +583,11 @@ End Function
 '  ELEMENT LIST (from the "INPUT" sheet)
 ' ===========================================================================
 
-' Reads the foundation element list off the "INPUT" sheet's G10 cell -
-' kept out of source so the same script works unmodified across workbooks
-' whose wingwall element numbers differ. Returns False (and leaves
-' foundList untouched) if the "INPUT" sheet doesn't exist.
+' Reads the WHOLE foundation's element list off the "INPUT" sheet's G12
+' cell (G10, the clear span only, when G12 is blank - ELEMENT_LIST_NOTE
+' then says so) - kept out of source so the same script works unmodified
+' across workbooks whose wingwall element numbers differ. Returns False
+' (and leaves foundList untouched) if the "INPUT" sheet doesn't exist.
 Private Function ReadElementListFromInput(ByRef foundList As String) As Boolean
 
     Dim wsInput As Worksheet
@@ -594,7 +601,13 @@ Private Function ReadElementListFromInput(ByRef foundList As String) As Boolean
         Exit Function
     End If
 
-    foundList = Trim(CStr(wsInput.Range("G10").Value))
+    ELEMENT_LIST_NOTE = ""
+    foundList = Trim(CStr(wsInput.Range("G12").Value))
+    If Len(foundList) = 0 Then
+        foundList = Trim(CStr(wsInput.Range("G10").Value))
+        ELEMENT_LIST_NOTE = "NOTE - INPUT!G12 (whole foundation) is blank: showing G10, the clear span " & _
+                            "only. Re-run the wingwall builder to fill G12."
+    End If
 
     ReadElementListFromInput = True
 
