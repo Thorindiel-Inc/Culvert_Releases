@@ -28,14 +28,14 @@ Option Explicit
 ' so a screenshot of a run does not otherwise say which build produced it -
 ' bump this whenever the file changes and check it matches before
 ' diagnosing anything from a report.
-Private Const SCRIPT_VERSION As String = "2026-10-08a"
+Private Const SCRIPT_VERSION As String = "2026-10-22a"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "EQ-1 + 0.3 LSA2_L; new EQ-2 (EQ-1 + 0.3 LL) in ENV_ALL/ENV_EQ, results table 1 and the run record"
+Private Const SCRIPT_CHANGELOG As String = "Clean pass also deletes the structure, boundary and load groups (db/GRUP, BNGR, LDGR) before the build"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -379,8 +379,8 @@ Private Declare PtrSafe Sub GetSystemTime Lib "kernel32" (ByRef lpSystemTime As 
 '  than misbehave. Bump them anyway when you add or remove a step.
 ' ---------------------------------------------------------------------------
 Private Const PROGRESS_STEPS_BUILD As Long = 19
-Private Const PROGRESS_STEPS_CLEAN As Long = 6
-Private Const PROGRESS_STEPS_VERIFY As Long = 2
+Private Const PROGRESS_STEPS_CLEAN As Long = 9
+Private Const PROGRESS_STEPS_VERIFY As Long = 5
 Private Const PROGRESS_BAR_WIDTH As Long = 24
 
 Private PROGRESS_STEP As Long
@@ -748,6 +748,12 @@ Sub BuildCulvertModel()
         vStld = VerifyEmpty("db/STLD", "Static load cases")
         Call StepResult(cleanReport, Progress("verify Load Combinations cleared"), vLcom)
         Call StepResult(cleanReport, Progress("verify Static Load Cases cleared"), vStld)
+        Call StepResult(cleanReport, Progress("verify Load Groups cleared"), _
+                        VerifyEmpty("db/LDGR", "Load groups"))
+        Call StepResult(cleanReport, Progress("verify Boundary Groups cleared"), _
+                        VerifyEmpty("db/BNGR", "Boundary groups"))
+        Call StepResult(cleanReport, Progress("verify Structure Groups cleared"), _
+                        VerifyEmpty("db/GRUP", "Structure groups"))
 
         ' Keep the build report concise so it does not exceed VBA's ~1024-char MsgBox limit.
         ' If clean steps were all OK, summarise in one line; if any warned/failed, show in full.
@@ -847,6 +853,11 @@ Private Sub RunCleanSteps(ByRef report As String)
     Call StepResult(report, Progress("delete Static Load Cases"), DeleteAndCheck("db/STLD"))
     Call StepResult(report, Progress("delete Elements"), DeleteAndCheck("db/ELEM"))
     Call StepResult(report, Progress("delete Nodes"), DeleteAndCheck("db/NODE"))
+    ' Groups last among the model data: nothing that references them by
+    ' name (loads, springs, elements, nodes) is left by now.
+    Call StepResult(report, Progress("delete Load Groups"), DeleteAndCheck("db/LDGR"))
+    Call StepResult(report, Progress("delete Boundary Groups"), DeleteAndCheck("db/BNGR"))
+    Call StepResult(report, Progress("delete Structure Groups"), DeleteAndCheck("db/GRUP"))
     Call StepResult(report, Progress("delete Sections"), DeleteAndCheck("db/SECT"))
     Call StepResult(report, Progress("delete Material"), DeleteAndCheck("db/MATL"))
 

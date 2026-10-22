@@ -30,14 +30,14 @@ Option Explicit
 ' and the code actually running can silently diverge, and a fix that
 ' looks ineffective is very often just not re-imported yet. Check this
 ' matches before diagnosing anything from a report screenshot.
-Private Const SCRIPT_VERSION As String = "2026-10-05a"
+Private Const SCRIPT_VERSION As String = "2026-10-22a"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Fallback Ec (used only when the Ec cell is blank or invalid) is now 32 GPa, TS500 C30"
+Private Const SCRIPT_CHANGELOG As String = "Clean pass also deletes the structure, boundary and load groups (db/GRUP, BNGR, LDGR); the springs' boundary group TEMEL_YAY is re-created before the springs"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -259,8 +259,8 @@ Private GEO_RIGHT_L As Double, GEO_RIGHT_HNEAR As Double, GEO_RIGHT_HFAR As Doub
 ' ---------------------------------------------------------------------------
 Private Const PROGRESS_BAR_WIDTH As Long = 20
 Private Const PROGRESS_STEPS_BUILD As Long = 21
-Private Const PROGRESS_STEPS_CLEAN As Long = 12
-Private Const PROGRESS_STEPS_VERIFY As Long = 12
+Private Const PROGRESS_STEPS_CLEAN As Long = 15
+Private Const PROGRESS_STEPS_VERIFY As Long = 15
 Private PROGRESS_STEP As Long
 Private PROGRESS_TOTAL As Long
 
@@ -606,6 +606,12 @@ Sub BuildWingwallModel()
                         VerifyEmpty("db/ELEM", "Elements"))
         Call StepResult(cleanReport, Progress("verify Nodes cleared"), _
                         VerifyEmpty("db/NODE", "Nodes"))
+        Call StepResult(cleanReport, Progress("verify Load Groups cleared"), _
+                        VerifyEmpty("db/LDGR", "Load groups"))
+        Call StepResult(cleanReport, Progress("verify Boundary Groups cleared"), _
+                        VerifyEmpty("db/BNGR", "Boundary groups"))
+        Call StepResult(cleanReport, Progress("verify Structure Groups cleared"), _
+                        VerifyEmpty("db/GRUP", "Structure groups"))
         Call StepResult(cleanReport, Progress("verify Thickness cleared"), _
                         VerifyEmpty("db/THIK", "Thickness"))
         Call StepResult(cleanReport, Progress("verify Material cleared"), _
@@ -717,6 +723,12 @@ Private Sub RunCleanSteps(ByRef report As String)
     Call StepResult(report, Progress("delete Point Springs"), DeleteAndCheck("db/NSPR"))
     Call StepResult(report, Progress("delete Elements"), DeleteAndCheck("db/ELEM"))
     Call StepResult(report, Progress("delete Nodes"), DeleteAndCheck("db/NODE"))
+    ' Groups last among the model data: nothing that references them by
+    ' name (loads, springs, elements, nodes) is left by now. The springs'
+    ' boundary group is re-created by PostFoundationSprings.
+    Call StepResult(report, Progress("delete Load Groups"), DeleteAndCheck("db/LDGR"))
+    Call StepResult(report, Progress("delete Boundary Groups"), DeleteAndCheck("db/BNGR"))
+    Call StepResult(report, Progress("delete Structure Groups"), DeleteAndCheck("db/GRUP"))
     Call StepResult(report, Progress("delete Thickness"), DeleteAndCheck("db/THIK"))
     Call StepResult(report, Progress("delete Material"), DeleteAndCheck("db/MATL"))
     Call StepResult(report, Progress("delete Named UCS"), DeleteAndCheck("db/NUCS"))
@@ -2191,6 +2203,8 @@ Private Function PostFoundationSprings() As String
     Dim kh As Double
     Dim res As String
     Dim i As Long
+    Dim resp As String
+    Dim statusCode As Long
 
     If SPRING_KV <= 0 Then
         PostFoundationSprings = "WARN: no subgrade modulus at " & INPUT_SHEET_NAME & _
@@ -2211,6 +2225,14 @@ Private Function PostFoundationSprings() As String
     End If
 
     kh = SPRING_KV * SPRING_H_RATIO
+
+    ' The clean pass deletes db/BNGR, so put the springs' boundary group
+    ' back first. Not measured live yet: whether ope/SSPS creates a missing
+    ' group itself is unknown, so a failure here only matters if the
+    ' springs below fail too - the response is not checked.
+    Call SendApiRequest("PUT", "db/BNGR", _
+        "{""Assign"": {""1"": {""NAME"": """ & SPRING_GROUP_NAME & """, ""AUTOTYPE"": 0}}}", _
+        resp, statusCode)
 
     b = "{""Argument"": {"
     b = b & """CONVERT_TO"": ""POINT_SPRING"","
