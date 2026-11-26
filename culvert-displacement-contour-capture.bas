@@ -25,14 +25,14 @@ Option Explicit
 ' hand, so the file in the repo and the code actually running can silently
 ' diverge - check this stamp matches the constant here before concluding
 ' anything from a run. Bump it whenever this file changes.
-Private Const SCRIPT_VERSION As String = "2026-09-29a"
+Private Const SCRIPT_VERSION As String = "2026-11-26a"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box"
+Private Const SCRIPT_CHANGELOG As String = "Works again after the Civil NX update of 2026-11: sends UNDEFORMED in the object form the new Civil NX accepts (it refused every capture before)"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -476,13 +476,13 @@ Private Function BuildCaptureBody(ByVal exportPath As String, _
     b = b & """VALUE_EXP"": false,"
     b = b & """DECIMAL_PT"": " & VALUE_DECIMAL_PT
     b = b & "},"
-    ' UNDEFORMED: bare boolean form - confirmed live 2026-09-21. The
-    ' object form {"OPT_CHECK": true} was tried first and failed here
-    ' ("MIDAS CIVIL NX second query is wrong", 200 OK, no file written);
-    ' CLAUDE.md previously claimed the object form worked on this file,
-    ' which was wrong and has been corrected. Don't reintroduce the
-    ' object form without re-testing live.
-    b = b & """UNDEFORMED"": true"
+    ' UNDEFORMED: object form. The Civil NX update of 2026-11 REFUSES the
+    ' bare boolean form this file used since 2026-09-21 ("MIDAS CIVIL NX
+    ' second query is wrong", 200 OK, no file written - bare true and bare
+    ' false alike); the object form and an omitted key both work and give
+    ' the same picture (measured live 2026-11-26 on a solved culvert). The
+    ' older Civil NX did the opposite, so re-test live before changing it.
+    b = b & """UNDEFORMED"": {""OPT_CHECK"": true}"
 
     b = b & "}"    ' closes TYPE_OF_DISPLAY
     b = b & "}"    ' closes RESULT_GRAPHIC
