@@ -11,4 +11,4 @@ sap2000-wingwall-model-build|2026-10-05a|Fallback Ec (used only when the Ec cell
 wingwall-displacement-contour-capture|2026-10-08a|Settlement pictures show the WHOLE foundation (INPUT!G12, rigid bands under the walls included) instead of the clear span only (G10)
 wingwall-load-diagram-capture|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box
 wingwall-model-build|2026-10-22a|Clean pass also deletes the structure, boundary and load groups (db/GRUP, BNGR, LDGR); the springs' boundary group TEMEL_YAY is re-created before the springs
-wingwall-plate-forces-capture|2026-09-29a|Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box
+wingwall-plate-forces-capture|2026-11-26a|For the Civil NX update of 2026-11: sends UNDEFORMED in the object form the new Civil NX accepts (the bare form is refused)

@@ -28,14 +28,14 @@ Option Explicit
 ' hand, so the file in the repo and the code actually running can silently
 ' diverge - check this stamp matches the constant here before concluding
 ' anything from a run. Bump it whenever this file changes.
-Private Const SCRIPT_VERSION As String = "2026-09-29a"
+Private Const SCRIPT_VERSION As String = "2026-11-26a"
 
 ' One-line summary of what changed in THIS version, shown by the updater
 ' next to this module when it's stale. Update alongside SCRIPT_VERSION -
 ' must stay on ONE physical line (no "_" continuation - the parser that
 ' reads this out does not resolve continuations) and must not contain "|"
 ' (breaks manifest.txt's pipe-delimited format).
-Private Const SCRIPT_CHANGELOG As String = "Final report opens in its own window: every line, normal 9 pt font (A- / A+ to resize), coloured ticks for OK / warnings / failures; falls back to the message box"
+Private Const SCRIPT_CHANGELOG As String = "For the Civil NX update of 2026-11: sends UNDEFORMED in the object form the new Civil NX accepts (the bare form is refused)"
 
 ' Identifies this module to the updater regardless of what it was
 ' named when pasted into Excel - these files carry no VB_Name, so the
@@ -887,7 +887,11 @@ Private Function BuildCaptureBody(ByVal exportPath As String, _
     b = b & """VALUE_EXP"": false,"
     b = b & """DECIMAL_PT"": 1"
     b = b & "},"
-    b = b & """UNDEFORMED"": true"
+    ' UNDEFORMED: object form. The Civil NX update of 2026-11 refuses the
+    ' bare boolean "true" this file used to send ("MIDAS CIVIL NX second
+    ' query is wrong", 200 OK, no file) - measured 2026-11-26 on the culvert;
+    ' plate models accepted the object form before the update too.
+    b = b & """UNDEFORMED"": {""OPT_CHECK"": true}"
     b = b & "}"
 
     b = b & "}"
